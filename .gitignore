@@ -1,0 +1,6 @@
+node_modules/
+.env
+.DS_Store
+AGENTS.md
+OPENAI_KEY_AUDIT.md
+npm-debug.log*
