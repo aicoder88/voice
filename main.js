@@ -1,5 +1,13 @@
 import "dotenv/config";
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen } from "electron";
+import { spawn } from "node:child_process";
+
+process.on("uncaughtException", (err) => {
+  console.error("[uncaughtException]", err && err.stack ? err.stack : err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("[unhandledRejection]", reason && reason.stack ? reason.stack : reason);
+});
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync } from "node:fs";
@@ -15,6 +23,7 @@ let tray = null;
 let serverPort = null;
 let serverError = null;
 let hotkeyEngine = null;
+let whisperServerProc = null;
 
 const TRAY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOUlEQVR42mNk+M9AGWAcNWBYGsCITwOyOAsmZ2NjI4SmaBgFRMxQB0YBh4ABjPgsoEoYUMUFVAlFAGZNCY+vXVwLAAAAAElFTkSuQmCC";
@@ -26,6 +35,58 @@ function makeTrayIcon() {
     if (!img.isEmpty()) return img;
   } catch {}
   return nativeImage.createEmpty();
+}
+
+async function bootWhisperServer() {
+  if ((process.env.STT_PROVIDER || "").toLowerCase() !== "whisper-local") return;
+  const bin = process.env.WHISPER_CLI ? process.env.WHISPER_CLI.replace(/-cli$/, "-server") : "whisper-server";
+  const model = process.env.WHISPER_MODEL || "./models/ggml-base.en.bin";
+  const port = process.env.WHISPER_PORT || "8081";
+  const args = [
+    "-m", model,
+    "--host", "127.0.0.1",
+    "--port", port,
+    "-t", "4",
+    "--no-fallback"
+  ];
+  whisperServerProc = spawn(bin, args);
+  let spawnError = null;
+  whisperServerProc.on("error", (err) => {
+    spawnError = err;
+    console.error("[whisper-server] spawn error:", err.message);
+    whisperServerProc = null;
+  });
+  whisperServerProc.stderr?.on("data", (d) => {
+    const s = d.toString();
+    if (/error|fail/i.test(s)) console.error("[whisper-server]", s.trim());
+  });
+  whisperServerProc.on("exit", (code) => {
+    console.error("[whisper-server] exited with code " + code);
+    whisperServerProc = null;
+  });
+  process.env.WHISPER_SERVER_URL = `http://127.0.0.1:${port}/inference`;
+  await waitForServer(`http://127.0.0.1:${port}`, 10000, () => spawnError || (whisperServerProc === null ? new Error("whisper-server died before ready") : null));
+  console.error("[whisper-server] ready at " + process.env.WHISPER_SERVER_URL);
+}
+
+async function waitForServer(baseUrl, timeoutMs, abortCheck) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const fatal = abortCheck && abortCheck();
+    if (fatal) throw fatal;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 500);
+      try {
+        const res = await fetch(baseUrl, { signal: ctrl.signal });
+        if (res.status < 600) return;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error("whisper-server did not start within " + timeoutMs + "ms");
 }
 
 async function bootRelayServer() {
@@ -115,7 +176,11 @@ function createDictationWindow() {
       sandbox: false
     }
   });
-  dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html`);
+  dictationWindow.webContents.on("console-message", (_e, level, message) => {
+    console.error("[dictation/renderer]", message);
+  });
+  const provider = encodeURIComponent((process.env.STT_PROVIDER || "openai").toLowerCase());
+  dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html?provider=${provider}`);
 }
 
 function showPillNearCursor() {
@@ -140,14 +205,34 @@ async function setupHotkey() {
     const mod = await import("./src/hotkey.js");
     hotkeyEngine = mod.startHotkey({
       onPress: () => {
+        if (global.__dictationBusy) {
+          console.error("[main] PRESS ignored — previous dictation still processing");
+          return;
+        }
+        clearTimeout(global.__dictationBusyTimer);
+        global.__dictationBusy = true;
+        global.__dictationPressAt = Date.now();
+        console.error("[main] dictation:start");
         showPillNearCursor();
         dictationWindow.webContents.send("dictation:start");
       },
       onRelease: () => {
+        if (!global.__dictationBusy) return;
+        global.__dictationReleaseAt = Date.now();
+        console.error("[main] dictation:stop");
         dictationWindow.webContents.send("dictation:stop");
+        hidePill();
+        clearTimeout(global.__dictationBusyTimer);
+        global.__dictationBusyTimer = setTimeout(() => {
+          if (global.__dictationBusy) {
+            console.error("[main] dictation:busy safety timeout — clearing");
+            global.__dictationBusy = false;
+          }
+        }, 1500);
       }
     });
-    console.log("Global right-Alt hotkey active (hold to dictate).");
+    const keyLabel = process.platform === "darwin" ? "right Option (⌥)" : "right Alt";
+    console.log(`Global ${keyLabel} hotkey active (hold to dictate).`);
   } catch (error) {
     console.error("Failed to start global hotkey:", error.message);
     console.error("Run: npm install uiohook-napi");
@@ -156,32 +241,57 @@ async function setupHotkey() {
 
 function setupIpc() {
   ipcMain.on("dictation:transcript", async (_event, transcript) => {
+    clearTimeout(global.__dictationBusyTimer);
+    const releaseAt = global.__dictationReleaseAt || Date.now();
+    const sinceRelease = Date.now() - releaseAt;
+    console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(transcript));
     hidePill();
     if (!transcript || !transcript.trim()) return;
 
     let textToType = transcript.trim();
 
     const cleanupEnabled = process.env.CLEANUP_ENABLED !== "false";
-    if (cleanupEnabled) {
+    const commaCount = (textToType.match(/,/g) || []).length;
+    const needsCleanup =
+      textToType.length > 120 ||
+      /\b(uh|um|uhh|er|erm)\b/i.test(textToType) ||
+      !/[.!?…]$/.test(textToType) ||
+      /\b(first|second|third|fourth|fifth|next,|finally,)\b/i.test(textToType) ||
+      commaCount >= 4;
+    if (cleanupEnabled && needsCleanup) {
+      const t0 = Date.now();
       try {
         const { polishTranscript } = await import("./src/cleanup.js");
         textToType = await polishTranscript(textToType);
+        console.error("[main] cleanup done (" + (Date.now() - t0) + "ms):", JSON.stringify(textToType));
       } catch (error) {
-        console.error("Cleanup pass failed, using raw transcript:", error.message);
+        console.error("[main] Cleanup pass failed, using raw:", error.message);
       }
+    } else {
+      console.error("[main] cleanup SKIPPED (short/clean, length=" + textToType.length + ")");
+    }
+
+    textToType = (textToType || "").trim();
+    if (textToType && !/[.!?…,;:"')\]]$/.test(textToType)) {
+      textToType += ".";
     }
 
     try {
+      const tType = Date.now();
       const { typeText } = await import("./src/typing.js");
       await typeText(textToType);
+      const totalSinceRelease = Date.now() - releaseAt;
+      console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, " + totalSinceRelease + "ms total since release)");
     } catch (error) {
-      console.error("Typing failed:", error.message);
-      console.error("Run: npm install @nut-tree-fork/nut-js");
+      console.error("[main] Typing failed:", error.stack || error.message);
+    } finally {
+      global.__dictationBusy = false;
     }
   });
 
   ipcMain.on("dictation:error", (_event, message) => {
     hidePill();
+    global.__dictationBusy = false;
     console.error("Dictation error:", message);
   });
 }
@@ -223,8 +333,38 @@ function createTray() {
   });
 }
 
+function buildAppMenu() {
+  const isMac = process.platform === "darwin";
+  const template = [
+    ...(isMac
+      ? [{
+          label: app.name,
+          submenu: [
+            { role: "about" },
+            { type: "separator" },
+            { role: "hide" },
+            { role: "hideOthers" },
+            { role: "unhide" },
+            { type: "separator" },
+            {
+              label: "Quit Voice Dictation",
+              accelerator: "Cmd+Q",
+              click: () => { app.isQuitting = true; app.quit(); }
+            }
+          ]
+        }]
+      : []),
+    { role: "editMenu" },
+    { role: "viewMenu" },
+    { role: "windowMenu" }
+  ];
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
+}
+
 app.whenReady().then(async () => {
+  try { await bootWhisperServer(); } catch (e) { console.error("[main] whisper-server failed:", e.message); }
   await bootRelayServer();
+  buildAppMenu();
   createMainWindow();
   createTray();
   if (serverPort) {
@@ -250,8 +390,9 @@ app.on("window-all-closed", (event) => {
 app.on("before-quit", () => {
   app.isQuitting = true;
   if (hotkeyEngine && typeof hotkeyEngine.stop === "function") {
-    try {
-      hotkeyEngine.stop();
-    } catch {}
+    try { hotkeyEngine.stop(); } catch {}
+  }
+  if (whisperServerProc) {
+    try { whisperServerProc.kill("SIGTERM"); } catch {}
   }
 });

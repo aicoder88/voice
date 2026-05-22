@@ -15,12 +15,16 @@ export async function typeText(text) {
 
   await sleep(RELEASE_DELAY_MS);
 
+  const needsLeadingSpace = !/^[\s.,;:!?\-)\]"'`]/.test(text);
+  const textToPaste = needsLeadingSpace ? " " + text : text;
+
   if (USE_CLIPBOARD) {
     const previousClipboard = clipboard.readText();
-    clipboard.writeText(text);
+    clipboard.writeText(textToPaste);
+    const modifier = process.platform === "darwin" ? Key.LeftSuper : Key.LeftControl;
     try {
-      await keyboard.pressKey(Key.LeftControl, Key.V);
-      await keyboard.releaseKey(Key.LeftControl, Key.V);
+      await keyboard.pressKey(modifier, Key.V);
+      await keyboard.releaseKey(modifier, Key.V);
     } finally {
       setTimeout(() => {
         try { clipboard.writeText(previousClipboard); } catch {}
@@ -29,5 +33,5 @@ export async function typeText(text) {
     return;
   }
 
-  await keyboard.type(text);
+  await keyboard.type(textToPaste);
 }

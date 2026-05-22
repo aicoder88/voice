@@ -13,10 +13,12 @@ let muteNode = null;
 let isRecording = false;
 let transcriptParts = [];
 let lastFinalAt = 0;
+let alreadyFinalized = false;
 
 function log(line) {
   const ts = new Date().toLocaleTimeString();
   logEl.textContent += `[${ts}] ${line}\n`;
+  console.log(line);
 }
 
 function setStatus(text) {
@@ -24,40 +26,51 @@ function setStatus(text) {
 }
 
 async function ensureSocket() {
-  if (socket && socket.readyState === WebSocket.OPEN) return socket;
-  if (socket && socket.readyState === WebSocket.CONNECTING) return socket;
+  if (socket) {
+    try { socket.close(); } catch {}
+    socket = null;
+  }
 
   return new Promise((resolve, reject) => {
-    const url = `ws://${window.location.host}/realtime?model=gpt-realtime-whisper`;
-    socket = new WebSocket(url);
-    socket.addEventListener("open", () => {
-      log("WS open (whisper)");
-      socket.send(
-        JSON.stringify({
-          type: "session.update",
-          session: {
-            type: "realtime",
-            audio: {
-              input: {
-                format: { type: "audio/pcm", rate: 24000 },
-                turn_detection: null,
-                transcription: { model: "gpt-realtime-whisper" }
+    const provider = (new URLSearchParams(window.location.search).get("provider") || window.STT_PROVIDER || "openai").toLowerCase();
+    const url =
+      provider === "deepgram"
+        ? `ws://${window.location.host}/realtime?provider=deepgram`
+        : provider === "whisper-local" || provider === "local"
+          ? `ws://${window.location.host}/realtime?provider=whisper-local`
+          : `ws://${window.location.host}/realtime?model=gpt-realtime-whisper`;
+    const thisSocket = new WebSocket(url);
+    socket = thisSocket;
+    thisSocket.addEventListener("open", () => {
+      log("WS open (" + provider + ")");
+      if (provider !== "deepgram" && provider !== "whisper-local" && provider !== "local") {
+        socket.send(
+          JSON.stringify({
+            type: "session.update",
+            session: {
+              type: "realtime",
+              audio: {
+                input: {
+                  format: { type: "audio/pcm", rate: 24000 },
+                  turn_detection: null,
+                  transcription: { model: "gpt-realtime-whisper" }
+                }
               }
             }
-          }
-        })
-      );
+          })
+        );
+      }
       resolve(socket);
     });
-    socket.addEventListener("error", (e) => {
+    thisSocket.addEventListener("error", (e) => {
       log("WS error");
       reject(e);
     });
-    socket.addEventListener("close", () => {
+    thisSocket.addEventListener("close", () => {
       log("WS closed");
-      socket = null;
+      if (socket === thisSocket) socket = null;
     });
-    socket.addEventListener("message", (event) => {
+    thisSocket.addEventListener("message", (event) => {
       try {
         const msg = JSON.parse(event.data);
         handleRealtimeEvent(msg);
@@ -105,6 +118,9 @@ function handleRealtimeEvent(msg) {
 }
 
 function finalizeAndSend(text) {
+  if (alreadyFinalized) return;
+  if (!text || !text.trim()) return;
+  alreadyFinalized = true;
   log("Final: " + text);
   ipcRenderer.send("dictation:transcript", text);
   transcriptParts = [];
@@ -139,6 +155,7 @@ async function startRecording() {
   }
 
   transcriptParts = [];
+  alreadyFinalized = false;
   isRecording = true;
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   processorNode = audioContext.createScriptProcessor(4096, 1, 1);
@@ -182,16 +199,21 @@ function stopRecording() {
   mediaStream = null;
 
   if (socket && socket.readyState === WebSocket.OPEN) {
+    log("Sending commit (socket readyState=" + socket.readyState + ")");
     socket.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+  } else {
+    log("CANNOT send commit, socket=" + !!socket + " readyState=" + (socket ? socket.readyState : "no-socket"));
   }
 
+  const FALLBACK_MS = Number(window.DICTATION_FALLBACK_MS || 1200);
   const startedAt = Date.now();
   setTimeout(() => {
+    if (alreadyFinalized) return;
     if (lastFinalAt < startedAt && transcriptParts.length > 0) {
       finalizeAndSend(transcriptParts.join("").trim());
     }
     setStatus("Idle");
-  }, 2500);
+  }, FALLBACK_MS);
 }
 
 ipcRenderer.on("dictation:start", () => startRecording());
