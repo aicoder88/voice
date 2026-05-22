@@ -3,11 +3,36 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "main": "main.js",
   "scripts": {
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "start": "electron .",
+    "build": "electron-builder"
   },
   "dependencies": {
+    "@nut-tree-fork/nut-js": "^4.2.6",
     "dotenv": "^16.4.7",
+    "uiohook-napi": "^1.5.5",
     "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.purr.voicedictation",
+    "productName": "Voice Dictation",
+    "files": [
+      "main.js",
+      "server.js",
+      "realtime-relay.js",
+      "src/**/*",
+      "public/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis"
+    }
   }
 }

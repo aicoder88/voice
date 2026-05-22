@@ -29,8 +29,12 @@ export function attachRealtimeRelay(server, options = {}) {
     });
   });
 
-  browserSockets.on("connection", (clientSocket) => {
-    const realtimeUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`;
+  browserSockets.on("connection", (clientSocket, request) => {
+    const requestUrl = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
+    const requestedModel = requestUrl.searchParams.get("model");
+    const allowedModels = new Set(["gpt-realtime-2", "gpt-realtime-whisper", "gpt-realtime-translate"]);
+    const effectiveModel = requestedModel && allowedModels.has(requestedModel) ? requestedModel : model;
+    const realtimeUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(effectiveModel)}`;
     const openaiSocket = new WebSocket(realtimeUrl, {
       headers: {
         Authorization: `Bearer ${apiKey}`
@@ -43,35 +47,40 @@ export function attachRealtimeRelay(server, options = {}) {
       sendToClient(clientSocket, {
         type: "local.status",
         status: "connected",
-        model
+        model: effectiveModel
       });
 
-      openaiSocket.send(
-        JSON.stringify({
-          type: "session.update",
-          session: {
-            type: "realtime",
-            instructions,
-            audio: {
-              input: {
-                format: {
-                  type: "audio/pcm",
-                  rate: 24000
-                },
-                turn_detection: {
-                  type: "server_vad"
-                }
-              },
-              output: {
-                format: {
-                  type: "audio/pcm",
-                  rate: 24000
+      const isTranscribeOnly = effectiveModel === "gpt-realtime-whisper" || effectiveModel === "gpt-realtime-translate";
+      const sessionPayload = isTranscribeOnly
+        ? {
+            type: "session.update",
+            session: {
+              type: "realtime",
+              audio: {
+                input: {
+                  format: { type: "audio/pcm", rate: 24000 },
+                  turn_detection: null
                 }
               }
             }
           }
-        })
-      );
+        : {
+            type: "session.update",
+            session: {
+              type: "realtime",
+              instructions,
+              audio: {
+                input: {
+                  format: { type: "audio/pcm", rate: 24000 },
+                  turn_detection: { type: "server_vad" }
+                },
+                output: {
+                  format: { type: "audio/pcm", rate: 24000 }
+                }
+              }
+            }
+          };
+      openaiSocket.send(JSON.stringify(sessionPayload));
 
       while (queuedMessages.length > 0) {
         openaiSocket.send(queuedMessages.shift());
