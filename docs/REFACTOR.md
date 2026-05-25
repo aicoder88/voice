@@ -39,8 +39,8 @@ The recommendation heuristic is documented next to the Status table. Honor it un
 | 6 | Split `public/realtime-voice-agent.js` | ✅ done | `500d6c6` | **large** |
 | 7 | Electron security: preload bridge + `contextIsolation: true` for dictation window (was M1) | ✅ done | `7218b9f` | medium |
 | 8 | `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent (was M2) | ✅ done | `c63b323` | medium |
-| 9 | Dependency refresh: latest Electron, `ws`, `uiohook-napi`, `@nut-tree-fork/nut-js` (was M3) | ⏭ next | — | small-risky |
-| 10 | `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js` (was M4) | ⏭ planned | — | medium |
+| 9 | Dependency refresh: latest Electron, `ws`, `uiohook-napi`, `@nut-tree-fork/nut-js` (was M3) | ✅ done | `ee59bec` | small-risky |
+| 10 | `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js` (was M4) | ⏭ next | — | medium |
 
 Phase 1 (passes 0–6, structural refactor) landed. Phase 2 (passes 7–10, modernization) is planned but not started — each needs explicit go-ahead before kicking off.
 
@@ -53,47 +53,67 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 9 — Dependency refresh
+### Pass 10 — `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js`
 
-**Status quo.** `package.json` pins:
+**Status quo.** This is a JavaScript codebase (`"type": "module"`, no TypeScript build). The Node-side files have no type annotations. VS Code and editor language servers infer types but miss a lot — function signatures, callback shapes, event payload shapes, and the wire-protocol event types that flow through the realtime relay.
 
-- Runtime: `@nut-tree-fork/nut-js ^4.2.6`, `dotenv ^16.4.7`, `uiohook-napi ^1.5.5`, `ws ^8.18.0`.
-- Dev: `@electron/rebuild ^4.0.4`, `electron ^33.4.11`, `electron-builder ^25.1.8`.
+**Goal.** Add `// @ts-check` to every Node-side source file plus inline JSDoc annotations on every exported function and major data shape. No `tsconfig.json`, no build step — just per-file directives that turn on TypeScript checking in any editor. Runtime is unaffected.
 
-The original M3 description said "bump Electron to v33" — that already happened. The actual task now is "check what's current in 2026 and bump cautiously."
+**Files in scope.**
 
-**Goal.** Pull each dependency to a current, stable version. Two of them (`uiohook-napi`, `@nut-tree-fork/nut-js`) contain native bindings that link against Electron's V8 ABI — a major Electron bump can require `electron-rebuild`.
+- `realtime-relay.js` (entry point — re-exports from `src/providers/*`).
+- `src/cleanup.js`
+- `src/dictation-session.js`
+- `src/hotkey.js`
+- `src/typing.js`
+- `src/providers/_shared.js`
+- `src/providers/openai.js`
+- `src/providers/deepgram.js`
+- `src/providers/whisper-local.js`
+- `server.js`
+- `main.js`
+- `preload.cjs` (CommonJS — JSDoc still works)
+
+**Files NOT in scope.**
+
+- `public/**` — browser code, separate language server context, not what JSDoc-on-Node is targeting. Skip for this pass.
+- `scripts/parity/*` — test files. Type-checking tests adds noise without much value. Skip.
 
 **Steps.**
 
-1. Run `npm outdated` to see the current vs latest matrix for every dep.
-2. For each dep, decide:
-   - **Patch/minor bump** (semver-safe) → bump in `package.json`, run `npm install`, run `npm run test:parity`.
-   - **Major bump** → check the changelog/release notes (use Context7 or fetch the package's CHANGELOG.md). Note any breaking changes. Only proceed if breakage is unrelated to how this repo uses the package.
-3. After all bumps, run `npx electron-rebuild` (the dep `@electron/rebuild` is already there). This relinks native modules against the new Electron ABI. If `uiohook-napi` or `nut-js` fail to rebuild, that's the first place to bisect.
-4. Run `npm run test:parity` — must stay 5/5 green.
-5. Manual smoke: `npm start`. Tray opens, hotkey works, dictation cycle types text into the focused field, both windows load.
-6. If `package-lock.json` shows huge churn (deep transitive bumps), commit it in the same commit as `package.json` — never split lockfile changes from manifest changes.
+1. Add `// @ts-check` as the first line of every in-scope file. Run `npx tsc --noEmit --allowJs --checkJs --target esnext --module nodenext --moduleResolution nodenext --strict false realtime-relay.js` (or equivalent per-file) to see what errors surface. Fix each by adding JSDoc, never by silencing.
+2. For each exported function, add a JSDoc block above the declaration with `@param` and `@returns`. Example:
+   ```js
+   /**
+    * @param {import("ws").WebSocketServer} server
+    * @param {{ model?: string, openaiApiKey?: string }} [options]
+    */
+   export function attachRealtimeRelay(server, options) { ... }
+   ```
+3. For shared data shapes (the relay's `local.status` event, the `dictationBridge` API in `preload.cjs`, the `DictationSession` class), define `@typedef` blocks once and reference them with `@type {Foo}`.
+4. For callbacks, type the function shape inline: `@param {(text: string) => Promise<void>} onResult`.
+5. Where third-party types are imported, use `import("ws").WebSocket` etc. Avoid `any` — if a type is genuinely unknowable, use `unknown` and narrow.
+6. After every file, run `npx tsc --noEmit --allowJs --checkJs <file>` and confirm zero errors before moving on.
+7. Run `npm run test:parity` — must remain 5/5 green. Type annotations are erased at runtime, so any runtime regression means a bad code change snuck in alongside the typing work. Keep this pass purely additive.
 
 **Validation.**
 
 - `npm run test:parity` → 5/5 green.
-- `npm start` → tray + hotkey + dictation all work end-to-end.
-- Electron DevTools shows no module-resolution errors on either window.
+- `npx tsc --noEmit --allowJs --checkJs --target esnext --module nodenext --moduleResolution nodenext` (no `tsconfig.json` needed) on every in-scope file → zero errors.
+- Open `realtime-relay.js` in VS Code → hover over `attachRealtimeRelay` shows the typed signature.
 
-**Why "small-risky".** The code diff is tiny (just `package.json` + `package-lock.json`), but Electron major bumps can break native modules silently. Run `electron-rebuild`. If something breaks, prefer reverting to the previous version of *that one dep* rather than holding up the whole pass.
+**Why medium.** The work is mechanical but spans ~10 files and surfaces real type bugs (mismatched callback signatures, optional vs required props, accidentally-untyped event payloads). The slowest part is writing the `@typedef`s for the relay protocol — read `docs/RELAY_PROTOCOL.md` first and mirror the event shape definitions there.
 
 **Risk notes.**
 
-1. **Native modules are the failure mode.** `uiohook-napi` (global keyboard listener) and `@nut-tree-fork/nut-js` (keyboard typing) are NAPI-based. They typically tolerate Electron bumps better than pure native modules, but still need a rebuild step.
-2. **Electron 33 → newer:** the dictation window's preload pattern (Pass 7) is forward-compatible with Electron 35+ and the eventual switch to V3 sandboxing. No anticipated regressions.
-3. **`ws` major bumps** rarely break consumer code, but parity tests will catch any wire-protocol-affecting change.
-4. **Lock file commit policy:** if `npm install` updates `package-lock.json` deeply (it usually does on a bump), commit it. Do not gitignore it.
-5. **Don't bump `dotenv`** unless there's a security advisory — it's stable and risk-free to leave.
+1. **Strict mode is too aggressive for an unannotated codebase.** Start with `--strict false`. After this pass settles, a follow-up could tighten to strict.
+2. **`@typedef` ordering matters.** Define shared types in the file they originate from, reference them via `import("./file.js").TypeName` from consumers. Don't centralize in a `types.d.ts` — that requires a tsconfig.
+3. **`preload.cjs` is CommonJS.** `@ts-check` still works. Use `module.exports` typing if needed, but the file currently just registers contextBridge — no exports to type.
+4. **Pure additive change.** No runtime behavior should differ. If parity goes red after this pass, the typing work isn't the problem — find the accidental code change.
 
-**Expected commit shape:** 2 files (`package.json` + `package-lock.json`). The lockfile diff will dominate — that's normal.
+**Expected commit shape:** ~10 files modified, +200 / −0 LoC (JSDoc blocks and `@ts-check` directives, no code deletions).
 
-**Heuristic call after this pass:** small-risky pass touching only `package.json` and the lockfile — no source code context shared with what came before, AND no source code context needed for the next pass (10, JSDoc types, which is `src/*` + `realtime-relay.js`). The pass-9 work is self-contained. Recommend **`ok`** to continue (cache is cheap when the diff is just a lockfile).
+**Heuristic call after this pass:** medium pass touching only Node-side source files — no overlap with the renderer work (Passes 7+8) or the lockfile (Pass 9). After this lands, the refactor is fully complete; the next reply should announce completion, not queue a Pass 11.
 
 ## Continuation prompt (paste into a fresh window)
 
