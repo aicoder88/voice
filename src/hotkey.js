@@ -1,16 +1,30 @@
+// @ts-check
 import { uIOhook, UiohookKey } from "uiohook-napi";
 
+// uiohook-napi's UiohookKey type exposes AltRight/Alt but not the AltLeft and
+// AltGraph constants some platforms emit. We probe via bracket access (which
+// types as `any`) and filter out the undefineds at runtime.
+/** @type {Record<string, number | undefined>} */
+const keyCodes = UiohookKey;
 const ALT_KEYCODES = new Set(
   [
-    UiohookKey.AltRight,
-    UiohookKey.AltLeft,
-    UiohookKey.Alt,
-    UiohookKey.AltGraph,
+    keyCodes.AltRight,
+    keyCodes.AltLeft,
+    keyCodes.Alt,
+    keyCodes.AltGraph,
     3640,
     56
   ].filter((v) => typeof v === "number")
 );
 
+/**
+ * Start listening for the global Alt-right hotkey via uiohook-napi. Calls
+ * `onPress` on the first qualifying keydown, `onRelease` on the subsequent
+ * keyup. Returns a disposer that detaches both listeners and stops uIOhook.
+ *
+ * @param {{ onPress?: () => void, onRelease?: () => void }} callbacks
+ * @returns {{ stop: () => void }}
+ */
 export function startHotkey({ onPress, onRelease }) {
   let pressed = false;
 

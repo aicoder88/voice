@@ -1,3 +1,4 @@
+// @ts-check
 // Shared helpers for the relay providers.
 // Underscore prefix marks this as an internal module — not part of the public
 // API of realtime-relay.js. See docs/RELAY_PROTOCOL.md for the wire contract
@@ -14,21 +15,31 @@ export const TRANSCRIPTION_ONLY_MODELS = new Set([
   "gpt-realtime-translate"
 ]);
 
-// JSON-serializes `event` and sends it to a browser client if the socket is
-// still open. No-op on a closed socket. All relay providers funnel their
-// outbound frames through this so the protocol contract has one chokepoint.
+/**
+ * JSON-serialize `event` and send it to a browser client if the socket is
+ * still open. No-op on a closed socket. All relay providers funnel their
+ * outbound frames through this so the protocol contract has one chokepoint.
+ *
+ * @param {WebSocket} socket
+ * @param {Record<string, unknown>} event
+ */
 export function sendToClient(socket, event) {
   if (socket.readyState === WebSocket.OPEN) {
     socket.send(JSON.stringify(event));
   }
 }
 
-// Wires an `unexpected-response` event on an upstream WebSocket. The upstream
-// returned HTTP non-2xx during the WS upgrade (typical for invalid API keys:
-// 401, 429, etc.). Today the relay used to log the body to stderr and leave
-// the browser blind — the parity harness had to time out to detect this.
-// Now we forward the status + first 200 chars of the body as a local.error
-// frame so the client (and the parity tests) can observe the failure.
+/**
+ * Wire an `unexpected-response` event on an upstream WebSocket. The upstream
+ * returned HTTP non-2xx during the WS upgrade (typical for invalid API keys:
+ * 401, 429, etc.). Forwards the status + first 200 chars of the body as a
+ * local.error frame so the client (and the parity tests) can observe the
+ * failure.
+ *
+ * @param {WebSocket} upstreamSocket
+ * @param {WebSocket} clientSocket
+ * @param {string} label
+ */
 export function forwardUnexpectedResponse(upstreamSocket, clientSocket, label) {
   upstreamSocket.on("unexpected-response", (_req, res) => {
     console.error(`[relay] ${label} unexpected-response status=${res.statusCode}`);

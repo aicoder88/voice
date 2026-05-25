@@ -1,3 +1,4 @@
+// @ts-check
 import "dotenv/config";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
@@ -13,6 +14,14 @@ const mimeTypes = {
   ".css": "text/css; charset=utf-8"
 };
 
+/**
+ * Boot the local HTTP server + WebSocket relay. Serves static files from
+ * `public/` and attaches the realtime relay at `/realtime`. Tries `port`
+ * first; if taken, falls back to an OS-chosen free port.
+ *
+ * @param {{ port?: number, model?: string }} [options]
+ * @returns {Promise<{ server: import("node:http").Server, port: number }>}
+ */
 export function startServer({ port = Number(process.env.PORT || 3000), model = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2" } = {}) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host}`);
@@ -34,7 +43,7 @@ export function startServer({ port = Number(process.env.PORT || 3000), model = p
   attachRealtimeRelay(server, { model });
 
   return new Promise((resolve, reject) => {
-    server.on("error", (error) => {
+    server.on("error", (/** @type {NodeJS.ErrnoException} */ error) => {
       if (error.code !== "EADDRINUSE") {
         reject(error);
         return;

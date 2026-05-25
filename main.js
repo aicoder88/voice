@@ -1,3 +1,4 @@
+// @ts-check
 import "dotenv/config";
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen } from "electron";
 
@@ -5,7 +6,8 @@ process.on("uncaughtException", (err) => {
   console.error("[uncaughtException]", err && err.stack ? err.stack : err);
 });
 process.on("unhandledRejection", (reason) => {
-  console.error("[unhandledRejection]", reason && reason.stack ? reason.stack : reason);
+  const stack = reason && typeof reason === "object" && "stack" in reason ? reason.stack : reason;
+  console.error("[unhandledRejection]", stack);
 });
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -15,13 +17,21 @@ import { DictationSession } from "./src/dictation-session.js";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
 
+/** @type {import("electron").BrowserWindow | null} */
 let mainWindow = null;
+/** @type {import("electron").BrowserWindow | null} */
 let pillWindow = null;
+/** @type {import("electron").BrowserWindow | null} */
 let dictationWindow = null;
+/** @type {import("electron").Tray | null} */
 let tray = null;
+/** @type {number | null} */
 let serverPort = null;
+/** @type {string | null} */
 let serverError = null;
+/** @type {{ stop: () => void } | null} */
 let hotkeyEngine = null;
+let isQuitting = false;
 const dictation = new DictationSession();
 
 const TRAY_PNG_BASE64 =
@@ -73,7 +83,7 @@ function createMainWindow() {
   }
 
   mainWindow.on("close", (event) => {
-    if (!app.isQuitting) {
+    if (!isQuitting) {
       event.preventDefault();
       mainWindow.hide();
     }
@@ -254,7 +264,7 @@ function createTray() {
     {
       label: "Quit",
       click: () => {
-        app.isQuitting = true;
+        isQuitting = true;
         app.quit();
       }
     }
@@ -270,11 +280,12 @@ function createTray() {
 
 function buildAppMenu() {
   const isMac = process.platform === "darwin";
+  /** @type {import("electron").MenuItemConstructorOptions[]} */
   const template = [
     ...(isMac
       ? [{
           label: app.name,
-          submenu: [
+          submenu: /** @type {import("electron").MenuItemConstructorOptions[]} */ ([
             { role: "about" },
             { type: "separator" },
             { role: "hide" },
@@ -284,9 +295,9 @@ function buildAppMenu() {
             {
               label: "Quit Voice Dictation",
               accelerator: "Cmd+Q",
-              click: () => { app.isQuitting = true; app.quit(); }
+              click: () => { isQuitting = true; app.quit(); }
             }
-          ]
+          ])
         }]
       : []),
     { role: "editMenu" },
@@ -322,7 +333,7 @@ app.on("window-all-closed", (event) => {
 });
 
 app.on("before-quit", () => {
-  app.isQuitting = true;
+  isQuitting = true;
   if (hotkeyEngine && typeof hotkeyEngine.stop === "function") {
     try { hotkeyEngine.stop(); } catch {}
   }

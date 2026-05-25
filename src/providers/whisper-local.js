@@ -1,3 +1,4 @@
+// @ts-check
 // Local whisper.cpp transport. Selected via ?provider=whisper-local (alias:
 // local). No upstream WebSocket — instead, accumulates PCM in memory until
 // the browser commits, then either POSTs a WAV to a long-running
@@ -21,10 +22,20 @@ const SAMPLE_RATE = 24000;
 // return an empty string immediately.
 const MIN_PCM_BYTES = 4800; // 0.1s @ 24 kHz mono int16
 
+/** @type {import("node:child_process").ChildProcess | null} */
 let whisperServerProc = null;
+/** @type {Promise<void> | null} */
 let whisperServerReady = null;
 let exitHandlerInstalled = false;
 
+/**
+ * Lazily spawn the whisper.cpp `whisper-server` binary on first attach.
+ * Resolves once the server is responding on the configured port. On failure,
+ * resets so the next attach() can retry.
+ *
+ * @param {string} [bin]
+ * @returns {Promise<void>}
+ */
 function ensureWhisperServer(bin) {
   if (whisperServerReady) return whisperServerReady;
 
@@ -80,6 +91,12 @@ function ensureWhisperServer(bin) {
   return whisperServerReady;
 }
 
+/**
+ * @param {string} baseUrl
+ * @param {number} timeoutMs
+ * @param {(() => Error | null) | null} [abortCheck]
+ * @returns {Promise<void>}
+ */
 async function waitForServer(baseUrl, timeoutMs, abortCheck) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -100,6 +117,10 @@ async function waitForServer(baseUrl, timeoutMs, abortCheck) {
   throw new Error("whisper-server did not start within " + timeoutMs + "ms");
 }
 
+/**
+ * @param {import("ws").WebSocket} clientSocket
+ * @param {{ bin: string, model: string }} opts
+ */
 export async function attach(clientSocket, { bin, model }) {
   const audioChunks = [];
   let chunkCount = 0;
@@ -158,6 +179,13 @@ export async function attach(clientSocket, { bin, model }) {
   });
 }
 
+/**
+ * @param {Buffer} pcmBuffer
+ * @param {number} sampleRate
+ * @param {string} bin
+ * @param {string} model
+ * @returns {Promise<string>}
+ */
 async function transcribePcm(pcmBuffer, sampleRate, bin, model) {
   const wav = wrapWav(pcmBuffer, sampleRate);
   const serverUrl = process.env.WHISPER_SERVER_URL;
@@ -183,9 +211,17 @@ async function transcribePcm(pcmBuffer, sampleRate, bin, model) {
   }
 }
 
+/**
+ * @param {string} url
+ * @param {Buffer} wavBuffer
+ * @returns {Promise<string>}
+ */
 async function runWhisperServer(url, wavBuffer) {
   const form = new FormData();
-  form.append("file", new Blob([wavBuffer], { type: "audio/wav" }), "audio.wav");
+  // Node Buffer is structurally a BlobPart, but TS's lib narrows the buffer's
+  // underlying type to ArrayBuffer (rejecting SharedArrayBuffer-backed views).
+  // Cast through to silence the false positive — Buffer is always non-shared.
+  form.append("file", new Blob([/** @type {ArrayBuffer} */ (wavBuffer.buffer)], { type: "audio/wav" }), "audio.wav");
   form.append("response_format", "json");
   form.append("temperature", "0.0");
   const res = await fetch(url, { method: "POST", body: form });
@@ -198,7 +234,13 @@ async function runWhisperServer(url, wavBuffer) {
   return text;
 }
 
-// 44-byte canonical PCM16 WAV header. Mono, 16-bit, caller-supplied rate.
+/**
+ * 44-byte canonical PCM16 WAV header. Mono, 16-bit, caller-supplied rate.
+ *
+ * @param {Buffer} pcm
+ * @param {number} sampleRate
+ * @returns {Buffer}
+ */
 function wrapWav(pcm, sampleRate) {
   const numChannels = 1;
   const bitsPerSample = 16;
@@ -222,6 +264,12 @@ function wrapWav(pcm, sampleRate) {
   return Buffer.concat([header, pcm]);
 }
 
+/**
+ * @param {string} bin
+ * @param {string} model
+ * @param {string} wavPath
+ * @returns {Promise<string>}
+ */
 function runWhisper(bin, model, wavPath) {
   return new Promise((resolve, reject) => {
     const args = [

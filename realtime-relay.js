@@ -1,3 +1,4 @@
+// @ts-check
 // /realtime WebSocket relay. Routes incoming browser connections to one of
 // the per-provider modules under src/providers/. See docs/RELAY_PROTOCOL.md
 // for the wire contract every provider must honor.
@@ -16,6 +17,27 @@ export { TRANSCRIPTION_ONLY_MODELS } from "./src/providers/_shared.js";
 const defaultInstructions =
   "You are a warm, emotionally aware realtime voice companion. Be natural, friendly, honest, lightly witty, and easy to interrupt. Listen for tone and context, avoid empty praise, and keep spoken replies conversational unless the user wants depth.";
 
+/**
+ * @typedef {object} RelayOptions
+ * @property {string} [apiKey]            OpenAI API key. Defaults to OPENAI_API_KEY env.
+ * @property {string} [model]             OpenAI realtime model id (default "gpt-realtime-2").
+ * @property {string} [path]              WebSocket path (default "/realtime").
+ * @property {string} [instructions]      System instructions for conversational mode.
+ * @property {string} [deepgramApiKey]    Deepgram API key. Defaults to DEEPGRAM_API_KEY env.
+ * @property {string} [deepgramModel]    Deepgram model id (default "nova-3").
+ * @property {string} [whisperBin]        Path to whisper-cli binary (default "whisper-cli").
+ * @property {string} [whisperModel]      Path to whisper.cpp model file.
+ * @property {string} [defaultProvider]   STT provider when ?provider= is absent ("openai" | "deepgram" | "whisper-local").
+ */
+
+/**
+ * Attach the relay's WebSocket server to an HTTP server. Returns the active
+ * path and a close() that shuts the WebSocket server down.
+ *
+ * @param {import("node:http").Server} server
+ * @param {RelayOptions} [options]
+ * @returns {{ path: string, close: () => void }}
+ */
 export function attachRealtimeRelay(server, options = {}) {
   const {
     apiKey = process.env.OPENAI_API_KEY,

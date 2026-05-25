@@ -1,4 +1,15 @@
+// @ts-check
+
+/**
+ * @typedef {object} ProviderConfig
+ * @property {"openai" | "anthropic" | "google"} kind
+ * @property {string} url
+ * @property {string} model
+ * @property {string} keyEnv
+ */
+
 const CLEANUP_PROVIDER = (process.env.CLEANUP_PROVIDER || (process.env.GROQ_API_KEY ? "groq" : "openai")).toLowerCase();
+/** @type {Record<string, ProviderConfig>} */
 const PROVIDER_DEFAULTS = {
   groq: { kind: "openai", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile", keyEnv: "GROQ_API_KEY" },
   openai: { kind: "openai", url: "https://api.openai.com/v1/chat/completions", model: "gpt-4.1-mini", keyEnv: "OPENAI_API_KEY" },
@@ -85,6 +96,14 @@ PRESERVATION (strict):
 OUTPUT:
 - Output the cleaned text only. No quotes around it. No preamble. No explanation. Use real newlines, not literal \\n.`;
 
+/**
+ * Send `rawText` to the configured cleanup provider with the system prompt.
+ * Returns the cleaned text on success, the original on any failure (missing
+ * API key, network error, timeout, non-2xx). Never throws.
+ *
+ * @param {string} rawText
+ * @returns {Promise<string>}
+ */
 export async function polishTranscript(rawText) {
   const apiKey = process.env[PROVIDER.keyEnv];
   if (!apiKey) return rawText;
@@ -124,6 +143,14 @@ export async function polishTranscript(rawText) {
   }
 }
 
+/**
+ * @param {ProviderConfig} provider
+ * @param {string} apiKey
+ * @param {string} model
+ * @param {string} systemPrompt
+ * @param {string} userText
+ * @returns {{ url: string, headers: Record<string, string>, body: string }}
+ */
 function buildRequest(provider, apiKey, model, systemPrompt, userText) {
   if (provider.kind === "anthropic") {
     return {
@@ -170,6 +197,11 @@ function buildRequest(provider, apiKey, model, systemPrompt, userText) {
   };
 }
 
+/**
+ * @param {ProviderConfig} provider
+ * @param {any} data
+ * @returns {string}
+ */
 function parseResponse(provider, data) {
   if (provider.kind === "anthropic") {
     const parts = Array.isArray(data?.content) ? data.content : [];

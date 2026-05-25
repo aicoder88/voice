@@ -1,3 +1,4 @@
+// @ts-check
 // Deepgram streaming transcription transport. Selected via ?provider=deepgram.
 //
 // Translates the OpenAI-shaped browser frames (input_audio_buffer.append /
@@ -8,6 +9,10 @@
 import WebSocket from "ws";
 import { sendToClient, forwardUnexpectedResponse } from "./_shared.js";
 
+/**
+ * @param {WebSocket} clientSocket
+ * @param {{ apiKey: string, model: string }} opts
+ */
 export function attach(clientSocket, { apiKey, model }) {
   const params = new URLSearchParams({
     model,

@@ -1,3 +1,4 @@
+// @ts-check
 // OpenAI Realtime API transport. The relay routes here for any /realtime
 // connection that does not request a different provider via ?provider=.
 //
@@ -15,6 +16,11 @@
 import WebSocket from "ws";
 import { sendToClient, TRANSCRIPTION_ONLY_MODELS, forwardUnexpectedResponse } from "./_shared.js";
 
+/**
+ * @param {WebSocket} clientSocket
+ * @param {URL} requestUrl
+ * @param {{ apiKey: string, model: string, instructions: string }} opts
+ */
 export function attach(clientSocket, requestUrl, { apiKey, model, instructions }) {
   const requestedModel = requestUrl.searchParams.get("model");
   const isTranscribeOnly = TRANSCRIPTION_ONLY_MODELS.has(requestedModel);
