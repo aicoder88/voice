@@ -2,6 +2,8 @@
 
 Snapshot of the current code, not a delivery plan. Update when files move.
 
+> Currently mid-refactor — see [`REFACTOR.md`](./REFACTOR.md) for which passes have landed and what's next.
+
 This repo has two product surfaces sharing one relay:
 
 1. **Reusable realtime relay + `<realtime-voice-agent>` web component** — drop-in voice agent for any web app. Documented in the top-level `README.md`.
