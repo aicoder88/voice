@@ -40,9 +40,9 @@ The recommendation heuristic is documented next to the Status table. Honor it un
 | 7 | Electron security: preload bridge + `contextIsolation: true` for dictation window (was M1) | ✅ done | `7218b9f` | medium |
 | 8 | `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent (was M2) | ✅ done | `c63b323` | medium |
 | 9 | Dependency refresh: latest Electron, `ws`, `uiohook-napi`, `@nut-tree-fork/nut-js` (was M3) | ✅ done | `ee59bec` | small-risky |
-| 10 | `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js` (was M4) | ⏭ next | — | medium |
+| 10 | `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js` (was M4) | ✅ done | `c593ece` | medium |
 
-Phase 1 (passes 0–6, structural refactor) landed. Phase 2 (passes 7–10, modernization) is planned but not started — each needs explicit go-ahead before kicking off.
+**Refactor complete.** All 11 passes (0–10) have landed. Parity stayed 5/5 throughout. Phase 1 (passes 0–6) restructured the codebase without behavior change; Phase 2 (passes 7–10) modernized Electron security, audio capture, dependencies, and added type checking.
 
 Recommendation heuristic for `ok` vs new window:
 
@@ -53,67 +53,38 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 10 — `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js`
+**Refactor complete.** No further passes planned. Future modernization work goes into the Status table with a sizing call before it starts, per "How to use this file" — never executed ad-hoc.
 
-**Status quo.** This is a JavaScript codebase (`"type": "module"`, no TypeScript build). The Node-side files have no type annotations. VS Code and editor language servers infer types but miss a lot — function signatures, callback shapes, event payload shapes, and the wire-protocol event types that flow through the realtime relay.
+### Pass 10 — `// @ts-check` + JSDoc types (landed `c593ece`)
 
-**Goal.** Add `// @ts-check` to every Node-side source file plus inline JSDoc annotations on every exported function and major data shape. No `tsconfig.json`, no build step — just per-file directives that turn on TypeScript checking in any editor. Runtime is unaffected.
+Added `// @ts-check` directive and inline JSDoc annotations to all 12 Node-side source files:
 
-**Files in scope.**
+- `realtime-relay.js`, `server.js`, `main.js`, `preload.cjs`
+- `src/cleanup.js`, `src/dictation-session.js`, `src/hotkey.js`, `src/typing.js`
+- `src/providers/_shared.js`, `src/providers/openai.js`, `src/providers/deepgram.js`, `src/providers/whisper-local.js`
 
-- `realtime-relay.js` (entry point — re-exports from `src/providers/*`).
-- `src/cleanup.js`
-- `src/dictation-session.js`
-- `src/hotkey.js`
-- `src/typing.js`
-- `src/providers/_shared.js`
-- `src/providers/openai.js`
-- `src/providers/deepgram.js`
-- `src/providers/whisper-local.js`
-- `server.js`
-- `main.js`
-- `preload.cjs` (CommonJS — JSDoc still works)
+No `tsconfig.json`, no build step — editors that read `// @ts-check` (VS Code default, JetBrains optional) now type-check the codebase live. Runtime unaffected.
 
-**Files NOT in scope.**
+Type check command (re-runnable for future verification):
 
-- `public/**` — browser code, separate language server context, not what JSDoc-on-Node is targeting. Skip for this pass.
-- `scripts/parity/*` — test files. Type-checking tests adds noise without much value. Skip.
+```
+npx --package=typescript -- tsc --noEmit --allowJs --checkJs \
+  --target esnext --module nodenext --moduleResolution nodenext --strict false \
+  realtime-relay.js server.js main.js preload.cjs \
+  src/cleanup.js src/dictation-session.js src/hotkey.js src/typing.js \
+  src/providers/_shared.js src/providers/openai.js \
+  src/providers/deepgram.js src/providers/whisper-local.js
+```
 
-**Steps.**
+The pass surfaced 5 real findings, each fixed without silencing:
 
-1. Add `// @ts-check` as the first line of every in-scope file. Run `npx tsc --noEmit --allowJs --checkJs --target esnext --module nodenext --moduleResolution nodenext --strict false realtime-relay.js` (or equivalent per-file) to see what errors surface. Fix each by adding JSDoc, never by silencing.
-2. For each exported function, add a JSDoc block above the declaration with `@param` and `@returns`. Example:
-   ```js
-   /**
-    * @param {import("ws").WebSocketServer} server
-    * @param {{ model?: string, openaiApiKey?: string }} [options]
-    */
-   export function attachRealtimeRelay(server, options) { ... }
-   ```
-3. For shared data shapes (the relay's `local.status` event, the `dictationBridge` API in `preload.cjs`, the `DictationSession` class), define `@typedef` blocks once and reference them with `@type {Foo}`.
-4. For callbacks, type the function shape inline: `@param {(text: string) => Promise<void>} onResult`.
-5. Where third-party types are imported, use `import("ws").WebSocket` etc. Avoid `any` — if a type is genuinely unknowable, use `unknown` and narrow.
-6. After every file, run `npx tsc --noEmit --allowJs --checkJs <file>` and confirm zero errors before moving on.
-7. Run `npm run test:parity` — must remain 5/5 green. Type annotations are erased at runtime, so any runtime regression means a bad code change snuck in alongside the typing work. Keep this pass purely additive.
+1. `main.js` used `app.isQuitting` — a community-tutorial monkey-patch onto Electron's App singleton. Replaced with a module-local `let isQuitting = false` (4 call sites).
+2. `main.js`'s `unhandledRejection` handler treated `reason` as if it had `.stack`. `reason` is `unknown` per Node types — narrowed via `"stack" in reason`.
+3. `main.js`'s `Menu.buildFromTemplate` argument lost its narrow `role: "about"` literal types through the array spread — annotated as `MenuItemConstructorOptions[]` to preserve them.
+4. `server.js`'s HTTP "error" listener typed `error` as `Error`, but the `EADDRINUSE` check uses `.code`. Retyped as `NodeJS.ErrnoException`.
+5. `whisper-local.js`'s `new Blob([buffer], ...)` failed TS 6.x's tightened `BlobPart` (SharedArrayBuffer vs ArrayBuffer). Passed `buffer.buffer` with explicit `ArrayBuffer` cast.
 
-**Validation.**
-
-- `npm run test:parity` → 5/5 green.
-- `npx tsc --noEmit --allowJs --checkJs --target esnext --module nodenext --moduleResolution nodenext` (no `tsconfig.json` needed) on every in-scope file → zero errors.
-- Open `realtime-relay.js` in VS Code → hover over `attachRealtimeRelay` shows the typed signature.
-
-**Why medium.** The work is mechanical but spans ~10 files and surfaces real type bugs (mismatched callback signatures, optional vs required props, accidentally-untyped event payloads). The slowest part is writing the `@typedef`s for the relay protocol — read `docs/RELAY_PROTOCOL.md` first and mirror the event shape definitions there.
-
-**Risk notes.**
-
-1. **Strict mode is too aggressive for an unannotated codebase.** Start with `--strict false`. After this pass settles, a follow-up could tighten to strict.
-2. **`@typedef` ordering matters.** Define shared types in the file they originate from, reference them via `import("./file.js").TypeName` from consumers. Don't centralize in a `types.d.ts` — that requires a tsconfig.
-3. **`preload.cjs` is CommonJS.** `@ts-check` still works. Use `module.exports` typing if needed, but the file currently just registers contextBridge — no exports to type.
-4. **Pure additive change.** No runtime behavior should differ. If parity goes red after this pass, the typing work isn't the problem — find the accidental code change.
-
-**Expected commit shape:** ~10 files modified, +200 / −0 LoC (JSDoc blocks and `@ts-check` directives, no code deletions).
-
-**Heuristic call after this pass:** medium pass touching only Node-side source files — no overlap with the renderer work (Passes 7+8) or the lockfile (Pass 9). After this lands, the refactor is fully complete; the next reply should announce completion, not queue a Pass 11.
+Parity 5/5 green throughout.
 
 ## Continuation prompt (paste into a fresh window)
 
