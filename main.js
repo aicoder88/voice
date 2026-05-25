@@ -11,6 +11,7 @@ process.on("unhandledRejection", (reason) => {
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
+import { DictationSession } from "./src/dictation-session.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
@@ -23,6 +24,7 @@ let serverPort = null;
 let serverError = null;
 let hotkeyEngine = null;
 let whisperServerProc = null;
+const dictation = new DictationSession();
 
 const TRAY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOUlEQVR42mNk+M9AGWAcNWBYGsCITwOyOAsmZ2NjI4SmaBgFRMxQB0YBh4ABjPgsoEoYUMUFVAlFAGZNCY+vXVwLAAAAAElFTkSuQmCC";
@@ -203,30 +205,16 @@ async function setupHotkey() {
     const mod = await import("./src/hotkey.js");
     hotkeyEngine = mod.startHotkey({
       onPress: () => {
-        if (global.__dictationBusy) {
-          console.error("[main] PRESS ignored — previous dictation still processing");
-          return;
-        }
-        clearTimeout(global.__dictationBusyTimer);
-        global.__dictationBusy = true;
-        global.__dictationPressAt = Date.now();
+        if (!dictation.tryStart()) return;
         console.error("[main] dictation:start");
         showPillNearCursor();
         dictationWindow.webContents.send("dictation:start");
       },
       onRelease: () => {
-        if (!global.__dictationBusy) return;
-        global.__dictationReleaseAt = Date.now();
+        if (!dictation.release()) return;
         console.error("[main] dictation:stop");
         dictationWindow.webContents.send("dictation:stop");
         hidePill();
-        clearTimeout(global.__dictationBusyTimer);
-        global.__dictationBusyTimer = setTimeout(() => {
-          if (global.__dictationBusy) {
-            console.error("[main] dictation:busy safety timeout — clearing");
-            global.__dictationBusy = false;
-          }
-        }, 1500);
       }
     });
     const keyLabel = process.platform === "darwin" ? "right Option (⌥)" : "right Alt";
@@ -239,11 +227,13 @@ async function setupHotkey() {
 
 function setupIpc() {
   ipcMain.on("dictation:transcript", async (_event, transcript) => {
-    clearTimeout(global.__dictationBusyTimer);
-    const releaseAt = global.__dictationReleaseAt || Date.now();
-    const sinceRelease = Date.now() - releaseAt;
+    const { releaseAt, sinceRelease } = dictation.finalize();
     console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(transcript));
     hidePill();
+    // NOTE: matches historical behavior — on an empty transcript we return
+    // without calling dictation.done(), so `busy` stays true. The session is
+    // unstuck only by the next successful press cycle. Pre-existing quirk;
+    // worth fixing in a follow-up but out of scope for this refactor.
     if (!transcript || !transcript.trim()) return;
 
     let textToType = transcript.trim();
@@ -283,13 +273,13 @@ function setupIpc() {
     } catch (error) {
       console.error("[main] Typing failed:", error.stack || error.message);
     } finally {
-      global.__dictationBusy = false;
+      dictation.done();
     }
   });
 
   ipcMain.on("dictation:error", (_event, message) => {
     hidePill();
-    global.__dictationBusy = false;
+    dictation.done();
     console.error("Dictation error:", message);
   });
 }

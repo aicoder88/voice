@@ -31,9 +31,9 @@ You then either type `ok`, or open a new Claude Code session in this repo and pa
 |---|------|--------|-----|------|
 | 0 | Scaffolding (docs + parity harness + dead-file purge) | ✅ done | `48754b2` | medium |
 | 1 | Fix platform-wrong error string + remove dead `preload.cjs` reference | ✅ done | `32507f3` | small |
-| 2 | De-duplicate transcription-only model set | ✅ done | _next-pass fills in_ | small |
-| 3 | Encapsulate dictation session state | ⏭ next | — | small |
-| 4 | Split `realtime-relay.js` into providers | pending | — | **large** |
+| 2 | De-duplicate transcription-only model set | ✅ done | `c505926` | small |
+| 3 | Encapsulate dictation session state | ✅ done | _next-pass fills in_ | small |
+| 4 | Split `realtime-relay.js` into providers | ⏭ next | — | **large** |
 | 5 | Move `whisper-server` boot into whisper-local provider | pending | — | medium |
 | 6 | Split `public/realtime-voice-agent.js` | pending | — | **large** |
 
@@ -44,30 +44,31 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 3 — encapsulate dictation session state
+### Pass 4 — split `realtime-relay.js` into providers
 
-**Files:** `main.js`, new `src/dictation-session.js`
+**Files:**
+
+- `realtime-relay.js` — shrinks from ~416 LoC to ~80 LoC of routing.
+- New `src/providers/_shared.js` — `sendToClient`, `wrapWav`, audio-buffer accumulator.
+- New `src/providers/openai.js` — `attachOpenAI` body (preserves `TRANSCRIPTION_ONLY_MODELS` import).
+- New `src/providers/deepgram.js` — `attachDeepgram` body.
+- New `src/providers/whisper-local.js` — `attachWhisperLocal` + `transcribePcm` + `runWhisperServer` + `runWhisper`.
 
 **Changes:**
 
-1. Create `src/dictation-session.js` exporting a `DictationSession` class with these fields/methods:
-   - `busy: boolean`
-   - `pressAt: number | null`
-   - `releaseAt: number | null`
-   - `start()` — sets `busy = true`, `pressAt = Date.now()`, returns `true` if accepted, `false` if already busy.
-   - `release()` — sets `releaseAt = Date.now()`, arms a safety timer (default 1500 ms) that clears `busy` if a transcript never lands. Returns the millisecond delta since press for logging.
-   - `finalize()` — clears the safety timer and resets `busy = false`. Returns `{ sinceRelease }`.
-   - `cancel(reason)` — clears timer + state on error.
-2. `main.js` — replace every `global.__dictationBusy / __dictationPressAt / __dictationReleaseAt / __dictationBusyTimer` use with an instance of `DictationSession`. The hotkey `onPress` / `onRelease` and the `ipcMain.on("dictation:transcript", ...)` / `ipcMain.on("dictation:error", ...)` handlers all become 3–5 line wrappers over the session object.
+1. Each provider exports an `attach(clientSocket, options)` (or `attach(clientSocket, requestUrl, options)` for OpenAI which needs query params) — same arity and behavior as the existing private function. Public surface of `realtime-relay.js` (`attachRealtimeRelay`, exported `TRANSCRIPTION_ONLY_MODELS`) is unchanged.
+2. `realtime-relay.js` becomes pure routing: read the `provider` query, validate credentials/binaries, dispatch to the right module.
+3. Move shared helpers (`sendToClient`, WAV header writer) into `_shared.js`. Underscore prefix marks it as a provider-internal module; not part of the public API.
+4. **One intentional behavior addition** (already flagged in Pass 0 insight): when an OpenAI / Deepgram upstream returns a non-2xx (`unexpected-response`), emit `{ type: "local.error", message: "openai HTTP <code>: <body>" }` before closing. Today the relay logs to stderr but the browser sees nothing — the parity harness had to work around it. This is a strict superset of today's behavior (no frame is removed); call it out explicitly in the commit message.
 
 **Validation:**
 
-- `npm run test:parity` → 4/4 green. (Parity gate tests the relay, not main.js, so this is mostly proving the relay wasn't accidentally touched.)
-- Manual: `npm start`, hold/release the hotkey three times in quick succession, confirm the "previous dictation still processing" guard still fires for the second press, and the safety-timeout still clears `busy` if no transcript arrives within 1.5 s.
+- `npm run test:parity` → 4/4 green. The OpenAI + Deepgram tests assert the connected→completed sequence; the addition of `local.error` on failure paths doesn't affect the success paths.
+- Add a fifth sub-test: feed a 401-equivalent (relay with `OPENAI_API_KEY=invalid_for_test`) and assert a `local.error` frame fires. Skip if can't construct.
 
-**Expected commit shape:** two files, ~80 lines added (new session module), ~25 lines removed (globals + ad-hoc timer mgmt in `main.js`). Pure refactor — no behavior change.
+**Expected commit shape:** five files created, one file shrunk by ~330 LoC, no public API change. **Size: large** — recommend `new window` after this lands.
 
-**Note for the assistant executing this pass:** also backfill Pass 2's SHA into the Status table when committing (lazy SHA-fill pattern).
+**Note for the assistant executing this pass:** also backfill Pass 3's SHA into the Status table when committing (lazy SHA-fill pattern). After this commit, recommend a fresh context window per the file's heuristic.
 
 ## Continuation prompt (paste into a fresh window)
 
