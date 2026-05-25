@@ -23,7 +23,7 @@ You then either type `ok`, or open a new Claude Code session in this repo and pa
   - `startServer({ port, model }) → Promise<{ server, port }>`.
   - `/realtime` WebSocket protocol per `docs/RELAY_PROTOCOL.md` (4 invariants).
 - Validation gate per pass: **`npm run test:parity` must stay green**.
-- Baseline before Pass 1: `tests 4 / pass 4 / ~6.6s` against OpenAI + Deepgram + whisper-local.
+- Baseline: `tests 5 / pass 5 / ~10.5s` against OpenAI + Deepgram + whisper-local + OpenAI-bad-key contract (added in Pass 4).
 
 ## Status
 
@@ -32,9 +32,9 @@ You then either type `ok`, or open a new Claude Code session in this repo and pa
 | 0 | Scaffolding (docs + parity harness + dead-file purge) | ✅ done | `48754b2` | medium |
 | 1 | Fix platform-wrong error string + remove dead `preload.cjs` reference | ✅ done | `32507f3` | small |
 | 2 | De-duplicate transcription-only model set | ✅ done | `c505926` | small |
-| 3 | Encapsulate dictation session state | ✅ done | _next-pass fills in_ | small |
-| 4 | Split `realtime-relay.js` into providers | ⏭ next | — | **large** |
-| 5 | Move `whisper-server` boot into whisper-local provider | pending | — | medium |
+| 3 | Encapsulate dictation session state | ✅ done | `125e98b` | small |
+| 4 | Split `realtime-relay.js` into providers | ✅ done | _next-pass fills in_ | **large** |
+| 5 | Move `whisper-server` boot into whisper-local provider | ⏭ next | — | medium |
 | 6 | Split `public/realtime-voice-agent.js` | pending | — | **large** |
 
 Recommendation heuristic for `ok` vs new window:
@@ -44,31 +44,42 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 4 — split `realtime-relay.js` into providers
+### Pass 5 — move `whisper-server` child-process boot into the whisper-local provider
 
 **Files:**
 
-- `realtime-relay.js` — shrinks from ~416 LoC to ~80 LoC of routing.
-- New `src/providers/_shared.js` — `sendToClient`, `wrapWav`, audio-buffer accumulator.
-- New `src/providers/openai.js` — `attachOpenAI` body (preserves `TRANSCRIPTION_ONLY_MODELS` import).
-- New `src/providers/deepgram.js` — `attachDeepgram` body.
-- New `src/providers/whisper-local.js` — `attachWhisperLocal` + `transcribePcm` + `runWhisperServer` + `runWhisper`.
+- `main.js` — delete `bootWhisperServer`, `waitForServer`, and the call site in `app.whenReady`. Also delete the `whisperServerProc` global and its `before-quit` cleanup.
+- `src/providers/whisper-local.js` — own the child-process boot. Lazy-start on first connection. Set `process.env.WHISPER_SERVER_URL` once ready (matching today's handoff). Cleanup on process exit.
+
+**Why this is medium not small:**
+
+The whisper-server lifetime currently spans the entire Electron app (boot at `whenReady`, kill at `before-quit`). Moving it into the provider means the first browser→relay connection triggers the boot — and that connection must wait for the server to be reachable before the relay starts feeding it audio. The provider's `attach()` becomes async-aware: it can't return immediately if the server is still starting.
+
+Two reasonable shapes:
+
+1. **Lazy + per-process singleton:** the provider boots the server once and caches the promise; subsequent attach calls await the same promise. Tracks the child process at module scope so a single SIGTERM handler in the module cleans it up at exit. _Cleanest. Recommended._
+2. **Eager from realtime-relay.js:** the relay boots the server during `attachRealtimeRelay()` if `STT_PROVIDER=whisper-local`. Closer to today's behavior but couples the relay to provider internals.
+
+Go with option 1.
 
 **Changes:**
 
-1. Each provider exports an `attach(clientSocket, options)` (or `attach(clientSocket, requestUrl, options)` for OpenAI which needs query params) — same arity and behavior as the existing private function. Public surface of `realtime-relay.js` (`attachRealtimeRelay`, exported `TRANSCRIPTION_ONLY_MODELS`) is unchanged.
-2. `realtime-relay.js` becomes pure routing: read the `provider` query, validate credentials/binaries, dispatch to the right module.
-3. Move shared helpers (`sendToClient`, WAV header writer) into `_shared.js`. Underscore prefix marks it as a provider-internal module; not part of the public API.
-4. **One intentional behavior addition** (already flagged in Pass 0 insight): when an OpenAI / Deepgram upstream returns a non-2xx (`unexpected-response`), emit `{ type: "local.error", message: "openai HTTP <code>: <body>" }` before closing. Today the relay logs to stderr but the browser sees nothing — the parity harness had to work around it. This is a strict superset of today's behavior (no frame is removed); call it out explicitly in the commit message.
+1. New module-scope state in `src/providers/whisper-local.js`:
+   - `let whisperServerProc = null;`
+   - `let whisperServerReady = null;` (Promise; cached on first call)
+   - `function ensureWhisperServer()` — spawns `whisper-server`, polls until `http://127.0.0.1:<port>` answers, sets `process.env.WHISPER_SERVER_URL`. Returns the cached promise on subsequent calls.
+2. `attach()` becomes async: awaits `ensureWhisperServer()` before wiring `clientSocket.on("message")`. Frames the browser sends during the boot wait are buffered (same logic that's already there for audio chunks; no change needed since the message handler isn't attached until after the await).
+3. Process-exit cleanup: register a `process.on("exit")` handler in the module that SIGTERMs the child if it's still alive. Don't rely on Electron's `before-quit`.
+4. `main.js`: delete `bootWhisperServer` + `waitForServer` + the `app.whenReady` call site + the `before-quit` whisperServerProc.kill block + the `whisperServerProc` global. Net deletion ~45 LoC.
 
 **Validation:**
 
-- `npm run test:parity` → 4/4 green. The OpenAI + Deepgram tests assert the connected→completed sequence; the addition of `local.error` on failure paths doesn't affect the success paths.
-- Add a fifth sub-test: feed a 401-equivalent (relay with `OPENAI_API_KEY=invalid_for_test`) and assert a `local.error` frame fires. Skip if can't construct.
+- `npm run test:parity` → 5/5 green. The whisper-local test must specifically prove that the provider's lazy server boot works: today the test relies on `whisper-cli` CLI fallback (no WHISPER_SERVER_URL set in the test env), so after this pass the test will trigger the lazy server boot and use the server path. Bump the whisper-local sub-test timeout to 60s to cover the first-boot cold start.
+- Manual: `STT_PROVIDER=whisper-local npm start`, hold the hotkey, dictate. Server boots on first press. Quit cleanly with ⌘Q, confirm `whisper-server` is no longer in `ps`.
 
-**Expected commit shape:** five files created, one file shrunk by ~330 LoC, no public API change. **Size: large** — recommend `new window` after this lands.
+**Expected commit shape:** two files, ~+90 / ~−60 LoC. No public API change.
 
-**Note for the assistant executing this pass:** also backfill Pass 3's SHA into the Status table when committing (lazy SHA-fill pattern). After this commit, recommend a fresh context window per the file's heuristic.
+**Note for the assistant executing this pass:** also backfill Pass 4's SHA into the Status table when committing (lazy SHA-fill pattern).
 
 ## Continuation prompt (paste into a fresh window)
 

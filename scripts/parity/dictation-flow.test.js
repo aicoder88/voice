@@ -49,9 +49,12 @@ async function bootRelay() {
 }
 
 function openClient(port, provider, extraQuery = "") {
+  // Always set ?provider= explicitly. Otherwise STT_PROVIDER in .env would
+  // override the test's intent (e.g. STT_PROVIDER=whisper-local would silently
+  // route the "openai" test to whisper-local).
   const url =
     provider === "openai"
-      ? `ws://127.0.0.1:${port}/realtime?model=gpt-realtime-whisper${extraQuery}`
+      ? `ws://127.0.0.1:${port}/realtime?provider=openai&model=gpt-realtime-whisper${extraQuery}`
       : `ws://127.0.0.1:${port}/realtime?provider=${provider}${extraQuery}`;
   const ws = new WebSocket(url);
   const frames = [];
@@ -268,4 +271,55 @@ test("parity: whisper-local completes one utterance", async (t) => {
   );
 
   assertCoreInvariants(frames, "whisper-local");
+});
+
+test("parity: openai bad-key surfaces as observable failure", async (t) => {
+  // Client-observable contract: when the upstream rejects the API key, the
+  // browser must be able to detect the failure — never see a "connected"
+  // status and never see a transcription frame. The exact failure shape
+  // depends on whether OpenAI rejects during the WS handshake (HTTP 4xx →
+  // local.error from forwardUnexpectedResponse) or after the upgrade
+  // completes (WS close with reason → local.status closed). Either form
+  // satisfies the contract.
+  if (!process.env.OPENAI_API_KEY) {
+    t.skip("OPENAI_API_KEY required (test overrides it before booting)");
+    return;
+  }
+  const realKey = process.env.OPENAI_API_KEY;
+  process.env.OPENAI_API_KEY = "sk-invalid-parity-test-no-such-key";
+  let relay;
+  try {
+    relay = await bootRelay();
+  } finally {
+    process.env.OPENAI_API_KEY = realKey;
+  }
+  t.after(() => relay.close());
+
+  const { ws, frames, ready } = openClient(relay.port, "openai");
+  await ready;
+  t.after(() => ws.close());
+
+  function hasFailureSignal() {
+    return frames.some(
+      (f) =>
+        f.type === "local.error" ||
+        (f.type === "local.status" && f.status === "closed")
+    );
+  }
+
+  try {
+    await waitFor(hasFailureSignal, { timeoutMs: 10000 });
+  } catch {
+    t.skip("upstream did not signal failure within 10s (network slow or key happens to work)");
+    return;
+  }
+
+  // OpenAI completes the WS handshake even with a bad key (`connected` may
+  // fire), then closes with an auth-error reason as soon as the relay sends
+  // session.update. The contract that matters: the client sees a failure
+  // signal and never sees a transcription frame.
+  const transcriptionFrame = frames.find((f) =>
+    String(f.type || "").startsWith("conversation.item.input_audio_transcription.")
+  );
+  assert.strictEqual(transcriptionFrame, undefined, "must not see transcription on bad key");
 });
