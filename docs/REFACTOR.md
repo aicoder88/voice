@@ -35,7 +35,9 @@ You then either type `ok`, or open a new Claude Code session in this repo and pa
 | 3 | Encapsulate dictation session state | ✅ done | `125e98b` | small |
 | 4 | Split `realtime-relay.js` into providers | ✅ done | `1a61d04` | **large** |
 | 5 | Move `whisper-server` boot into whisper-local provider | ✅ done | `9546233` | medium |
-| 6 | Split `public/realtime-voice-agent.js` | ⏭ next | — | **large** |
+| 6 | Split `public/realtime-voice-agent.js` | ✅ done | `500d6c6` | **large** |
+
+**Refactor complete.** All planned passes have landed. Baseline still 5/5 parity. Further work lives in the "Out of scope" section below as separate PRs (M1–M4).
 
 Recommendation heuristic for `ok` vs new window:
 
@@ -44,41 +46,17 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 6 — split `public/realtime-voice-agent.js`
+**Refactor complete.** No further passes planned. Awaiting explicit approval before starting any of the "Out of scope" follow-ups (M1–M4) below — each should land as its own PR, not as part of this refactor.
 
-`public/realtime-voice-agent.js` is 726 lines: defaults + huge HTML/CSS template + WebSocket lifecycle + audio capture/playback + DOM event wiring + pure helpers all in one file. The public surface is the `<realtime-voice-agent>` custom element and its attributes (`endpoint`, `agent`, `compact`, `instructions`, `autoconnect`) — none of that changes.
+### Pass 6 — split `public/realtime-voice-agent.js` (landed `500d6c6`)
 
-**Public-API constraint:**
+Split the 726-line entry file into three focused modules under `public/realtime-voice-agent/`:
 
-The file is loaded by callers as `<script type="module" src="realtime-voice-agent.js"></script>` (check `public/index.html` and `public/setup.html` to confirm). The path `public/realtime-voice-agent.js` MUST remain — it is the entry point and the file that registers the custom element via `customElements.define(...)`. The split is internal: extracted modules live under `public/realtime-voice-agent/` and are imported relatively.
+- `audio-utils.js` (37 LoC) — `downsample`, `floatTo16BitPcm`, `arrayBufferToBase64`, `base64ToInt16Array`. Pure, no DOM.
+- `agents.js` (42 LoC) — `defaultAgents`, `agentLabels`, `personalityStorageKey`, plus `loadSavedPersonalities` / `savePersonality` / `clearSavedPersonalities` wrappers around `localStorage`.
+- `template.js` (234 LoC) — `renderTemplate({ title, subtitle })` returning the full `<style>` + markup. All ids/classes preserved.
 
-Before extracting anything, **read `public/index.html` and `public/setup.html`** to confirm both pages load this file as a module. If either uses a classic `<script>` tag, the file has to remain self-contained (no `import`) — in that case, fall back to a single-file refactor that just collapses the giant `render()` template into a top-level template-literal constant.
-
-**Recommended split (assuming module loading):**
-
-- `public/realtime-voice-agent/audio-utils.js` — `downsample`, `floatTo16BitPcm`, `arrayBufferToBase64`, `base64ToInt16Array`. Pure functions, no DOM. ~40 LoC.
-- `public/realtime-voice-agent/agents.js` — `defaultAgents`, `agentLabels`, `personalityStorageKey`, plus a `loadPersonalities()` / `savePersonalities()` pair that wraps `localStorage`. ~50 LoC.
-- `public/realtime-voice-agent/template.js` — exports a single `templateHTML` string (or a `renderTemplate(root)` function that sets `root.innerHTML` and returns a `$` helper to query the shadow tree). Hosts the long HTML + `<style>` block currently embedded in `render()`. ~250 LoC.
-- `public/realtime-voice-agent.js` — keeps the `RealtimeVoiceAgent` class, the `customElements.define` call, the `targetSampleRate` constant, and `connectedCallback`/`disconnectedCallback`/`connect()`/`updateSession()`/playback/mic-level methods. Imports from the three new modules. ~350 LoC after extraction.
-
-**Why this is large:**
-
-The HTML/CSS template alone is hundreds of lines of strings interleaved with classnames the JS reaches into via `querySelector` — extracting it means every selector used elsewhere in the file has to keep matching. The audio helpers are easy; the template is the risky part. Do them in that order so a regression caught by manual smoke can be bisected easily.
-
-**Validation:**
-
-- `npm run test:parity` → 5/5 green. (The component is exercised only indirectly through parity; the harness uses a raw `ws://.../realtime` client, not the custom element.)
-- Manual smoke (no automation): `npm run dev`, open `http://localhost:3000/index.html`, click into the agent UI, change personality, type instructions, press Connect, speak. Confirm: shadow DOM matches the original (visual diff), WebSocket connects, transcription frames render, voice playback plays back. Then load `setup.html` from the Electron app (`npm start`) and confirm the embedded scratchpad still works.
-- Console must be clean (no 404s for new module paths, no "customElements.define already called" if HMR-style reloads happen).
-
-**Expected commit shape:** four files in `public/` (one modified, three new), ~+730 / ~−400 LoC net (template gets copy-pasted, so most "additions" are moves).
-
-**Risk notes for the executing assistant:**
-
-1. **The file is loaded by the browser, not Node.** Check the actual `<script>` tag in both HTML pages before splitting. ES modules need `type="module"` AND relative imports starting with `./`.
-2. **Don't rename or re-order DOM classnames.** Anything the existing JS does via `shadowRoot.querySelector(".foo")` must still find the same element after extraction.
-3. **`customElements.define()` must run exactly once.** Keep it at the bottom of the entry file. If the browser hot-reloads, a second `define` throws — but that's pre-existing behavior, don't try to fix it in this pass.
-4. **No behavior change.** This is a pure code-organization refactor. Do not "improve" anything along the way.
+Entry file shrinks 726 → 439 LoC. `index.html` already loads the entry with `type="module"`, so relative imports resolve through the existing file-based static handler (`server.js:19`) with no server change. Verified `setup.html` does not load this component. Parity 5/5 green.
 
 ## Continuation prompt (paste into a fresh window)
 
