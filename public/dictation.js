@@ -33,6 +33,10 @@ async function ensureSocket() {
 
   return new Promise((resolve, reject) => {
     const provider = (new URLSearchParams(window.location.search).get("provider") || window.STT_PROVIDER || "openai").toLowerCase();
+    // For the OpenAI path we request the dictation-flavored transcription-only
+    // model. The relay reads ?model=, switches the upstream session into
+    // STT-only shape, and sends its own session.update on open — we do not
+    // need to send one from here. See docs/RELAY_PROTOCOL.md.
     const url =
       provider === "deepgram"
         ? `ws://${window.location.host}/realtime?provider=deepgram`
@@ -43,23 +47,6 @@ async function ensureSocket() {
     socket = thisSocket;
     thisSocket.addEventListener("open", () => {
       log("WS open (" + provider + ")");
-      if (provider !== "deepgram" && provider !== "whisper-local" && provider !== "local") {
-        socket.send(
-          JSON.stringify({
-            type: "session.update",
-            session: {
-              type: "realtime",
-              audio: {
-                input: {
-                  format: { type: "audio/pcm", rate: 24000 },
-                  turn_detection: null,
-                  transcription: { model: "gpt-realtime-whisper" }
-                }
-              }
-            }
-          })
-        );
-      }
       resolve(socket);
     });
     thisSocket.addEventListener("error", (e) => {

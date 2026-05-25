@@ -30,9 +30,9 @@ You then either type `ok`, or open a new Claude Code session in this repo and pa
 | # | Pass | Status | SHA | Size |
 |---|------|--------|-----|------|
 | 0 | Scaffolding (docs + parity harness + dead-file purge) | ✅ done | `48754b2` | medium |
-| 1 | Fix platform-wrong error string + remove dead `preload.cjs` reference | ✅ done | `cb490ee` | small |
-| 2 | De-duplicate transcription-only model set | ⏭ next | — | small |
-| 3 | Encapsulate dictation session state | pending | — | small |
+| 1 | Fix platform-wrong error string + remove dead `preload.cjs` reference | ✅ done | `32507f3` | small |
+| 2 | De-duplicate transcription-only model set | ✅ done | _next-pass fills in_ | small |
+| 3 | Encapsulate dictation session state | ⏭ next | — | small |
 | 4 | Split `realtime-relay.js` into providers | pending | — | **large** |
 | 5 | Move `whisper-server` boot into whisper-local provider | pending | — | medium |
 | 6 | Split `public/realtime-voice-agent.js` | pending | — | **large** |
@@ -44,22 +44,30 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 2 — de-duplicate transcription-only model set
+### Pass 3 — encapsulate dictation session state
 
-**Files:** `realtime-relay.js`, `public/dictation.js`
+**Files:** `main.js`, new `src/dictation-session.js`
 
 **Changes:**
 
-1. `realtime-relay.js:67` — extract `const TRANSCRIPTION_ONLY_MODELS = new Set([...])` to module scope and `export` it. The relay's OpenAI branch already uses it to decide between conversation mode and transcription-only mode.
-2. `public/dictation.js:46-62` — remove the redundant `session.update` send. The relay already synthesizes the correct `session.update` on upstream open (see `realtime-relay.js:80-104`). The browser sending another one is dead since both currently agree, and is a maintenance trap.
-3. `public/dictation.js:41` — the browser hard-codes `?model=gpt-realtime-whisper` for the OpenAI path. That's fine to keep as the dictation default, but add a short comment pointing readers to `RELAY_PROTOCOL.md` for the canonical list of transcription-only model names.
+1. Create `src/dictation-session.js` exporting a `DictationSession` class with these fields/methods:
+   - `busy: boolean`
+   - `pressAt: number | null`
+   - `releaseAt: number | null`
+   - `start()` — sets `busy = true`, `pressAt = Date.now()`, returns `true` if accepted, `false` if already busy.
+   - `release()` — sets `releaseAt = Date.now()`, arms a safety timer (default 1500 ms) that clears `busy` if a transcript never lands. Returns the millisecond delta since press for logging.
+   - `finalize()` — clears the safety timer and resets `busy = false`. Returns `{ sinceRelease }`.
+   - `cancel(reason)` — clears timer + state on error.
+2. `main.js` — replace every `global.__dictationBusy / __dictationPressAt / __dictationReleaseAt / __dictationBusyTimer` use with an instance of `DictationSession`. The hotkey `onPress` / `onRelease` and the `ipcMain.on("dictation:transcript", ...)` / `ipcMain.on("dictation:error", ...)` handlers all become 3–5 line wrappers over the session object.
 
 **Validation:**
 
-- `npm run test:parity` → 4/4 green. Specifically the OpenAI test must still pass, since the protocol-frame sequence (`session.update` from browser, or not) is part of the wire contract.
-- Manual: `npm start`, hold the hotkey, dictate a phrase, confirm transcription still arrives.
+- `npm run test:parity` → 4/4 green. (Parity gate tests the relay, not main.js, so this is mostly proving the relay wasn't accidentally touched.)
+- Manual: `npm start`, hold/release the hotkey three times in quick succession, confirm the "previous dictation still processing" guard still fires for the second press, and the safety-timeout still clears `busy` if no transcript arrives within 1.5 s.
 
-**Expected commit shape:** two files, ~25 lines changed (mostly deletions in `dictation.js`).
+**Expected commit shape:** two files, ~80 lines added (new session module), ~25 lines removed (globals + ad-hoc timer mgmt in `main.js`). Pure refactor — no behavior change.
+
+**Note for the assistant executing this pass:** also backfill Pass 2's SHA into the Status table when committing (lazy SHA-fill pattern).
 
 ## Continuation prompt (paste into a fresh window)
 

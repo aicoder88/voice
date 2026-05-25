@@ -7,6 +7,14 @@ import { join } from "node:path";
 const defaultInstructions =
   "You are a warm, emotionally aware realtime voice companion. Be natural, friendly, honest, lightly witty, and easy to interrupt. Listen for tone and context, avoid empty praise, and keep spoken replies conversational unless the user wants depth.";
 
+// Realtime models that are transcription-only: the relay switches the OpenAI
+// session into STT-only shape (no output audio, no turn detection) when one
+// of these is requested via ?model=. Source of truth — do not duplicate.
+export const TRANSCRIPTION_ONLY_MODELS = new Set([
+  "gpt-realtime-whisper",
+  "gpt-realtime-translate"
+]);
+
 export function attachRealtimeRelay(server, options = {}) {
   const {
     apiKey = process.env.OPENAI_API_KEY,
@@ -64,8 +72,7 @@ export function attachRealtimeRelay(server, options = {}) {
 
 function attachOpenAI(clientSocket, requestUrl, { apiKey, model, instructions }) {
   const requestedModel = requestUrl.searchParams.get("model");
-  const transcriptionOnlyModels = new Set(["gpt-realtime-whisper", "gpt-realtime-translate"]);
-  const isTranscribeOnly = transcriptionOnlyModels.has(requestedModel);
+  const isTranscribeOnly = TRANSCRIPTION_ONLY_MODELS.has(requestedModel);
   const transcriptionModel = isTranscribeOnly ? requestedModel : null;
   const sessionModel = isTranscribeOnly ? "gpt-realtime-2" : (requestedModel || model);
   const realtimeUrl = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(sessionModel)}`;
