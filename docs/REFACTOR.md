@@ -38,8 +38,8 @@ The recommendation heuristic is documented next to the Status table. Honor it un
 | 5 | Move `whisper-server` boot into whisper-local provider | ✅ done | `9546233` | medium |
 | 6 | Split `public/realtime-voice-agent.js` | ✅ done | `500d6c6` | **large** |
 | 7 | Electron security: preload bridge + `contextIsolation: true` for dictation window (was M1) | ✅ done | `7218b9f` | medium |
-| 8 | `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent (was M2) | ⏭ next | — | medium |
-| 9 | Dependency refresh: latest Electron, `ws`, `uiohook-napi`, `@nut-tree-fork/nut-js` (was M3) | ⏭ planned | — | small-risky |
+| 8 | `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent (was M2) | ✅ done | `c63b323` | medium |
+| 9 | Dependency refresh: latest Electron, `ws`, `uiohook-napi`, `@nut-tree-fork/nut-js` (was M3) | ⏭ next | — | small-risky |
 | 10 | `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js` (was M4) | ⏭ planned | — | medium |
 
 Phase 1 (passes 0–6, structural refactor) landed. Phase 2 (passes 7–10, modernization) is planned but not started — each needs explicit go-ahead before kicking off.
@@ -53,47 +53,47 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 8 — `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent
+### Pass 9 — Dependency refresh
 
-**Status quo.** Two renderer files use the deprecated `ScriptProcessorNode`:
+**Status quo.** `package.json` pins:
 
-- `public/dictation.js:147` — `audioContext.createScriptProcessor(4096, 1, 1)`, downsamples mic → 24kHz PCM16, sends via WebSocket.
-- `public/realtime-voice-agent.js:203` — same shape, plus a side-effect to update a UI mic-level pill.
+- Runtime: `@nut-tree-fork/nut-js ^4.2.6`, `dotenv ^16.4.7`, `uiohook-napi ^1.5.5`, `ws ^8.18.0`.
+- Dev: `@electron/rebuild ^4.0.4`, `electron ^33.4.11`, `electron-builder ^25.1.8`.
 
-`ScriptProcessorNode` runs the audio callback on the main thread, which Chrome has been warning about for years (`(deprecated)` in DevTools, glitchy under load). `AudioWorklet` is the modern replacement: the per-buffer code runs in a dedicated `AudioWorkletGlobalScope` thread and communicates with the main thread via `MessagePort`.
+The original M3 description said "bump Electron to v33" — that already happened. The actual task now is "check what's current in 2026 and bump cautiously."
 
-**Goal.** Move the per-buffer audio capture to a shared `AudioWorklet` module, used by both renderers, with zero observable behavior change.
+**Goal.** Pull each dependency to a current, stable version. Two of them (`uiohook-napi`, `@nut-tree-fork/nut-js`) contain native bindings that link against Electron's V8 ABI — a major Electron bump can require `electron-rebuild`.
 
-**Recommended split.**
+**Steps.**
 
-- `public/audio-capture-worklet.js` (new) — a single `AudioWorkletProcessor` subclass. Receives mono Float32 input frames in `process()`, posts them back to the main thread via `this.port.postMessage(...)`. Keeps zero state besides what's needed for the buffer hop. The downsampling + Int16 conversion can either happen inside the worklet (cleaner; one message = one ready-to-send PCM16 chunk) or in the main thread after `port.onmessage` (simpler; the worklet just relays). **Recommend in-worklet conversion** — it keeps the per-message payload small and the main thread idle.
-- `public/realtime-voice-agent/audio-utils.js` (existing) — keep the pure helpers (`downsample`, `floatTo16BitPcm`, `arrayBufferToBase64`, `base64ToInt16Array`) where they are. The worklet duplicates `downsample` + `floatTo16BitPcm` inline because worklets cannot use ES imports the way main-thread modules can — they're registered via `audioContext.audioWorklet.addModule(url)` and loaded in their own scope. Duplicating those ~15 LoC is the documented pattern; do not try to share via `import`.
-- `public/dictation.js` — replace the `createScriptProcessor` block (lines 147–162) with:
-  1. `await audioContext.audioWorklet.addModule("/audio-capture-worklet.js")` (once per AudioContext).
-  2. Create an `AudioWorkletNode(audioContext, "audio-capture-processor", { processorOptions: { inputRate: audioContext.sampleRate, outputRate: targetSampleRate } })`.
-  3. Wire `source → workletNode → muteNode → destination` (same graph topology).
-  4. `workletNode.port.onmessage = (e) => socket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: arrayBufferToBase64(e.data) }))`.
-- `public/realtime-voice-agent.js` — same swap. The mic-level pill update (`this.updateMicLevel(input)`) currently runs in the audio callback. Move it to the `port.onmessage` handler — it only needs the peak of the chunk, which the worklet can compute and include in the message (or send the raw Float32 alongside the PCM16 if the size is fine). **Recommend** the worklet includes a `peak` float in each message so the main thread does no audio math.
+1. Run `npm outdated` to see the current vs latest matrix for every dep.
+2. For each dep, decide:
+   - **Patch/minor bump** (semver-safe) → bump in `package.json`, run `npm install`, run `npm run test:parity`.
+   - **Major bump** → check the changelog/release notes (use Context7 or fetch the package's CHANGELOG.md). Note any breaking changes. Only proceed if breakage is unrelated to how this repo uses the package.
+3. After all bumps, run `npx electron-rebuild` (the dep `@electron/rebuild` is already there). This relinks native modules against the new Electron ABI. If `uiohook-napi` or `nut-js` fail to rebuild, that's the first place to bisect.
+4. Run `npm run test:parity` — must stay 5/5 green.
+5. Manual smoke: `npm start`. Tray opens, hotkey works, dictation cycle types text into the focused field, both windows load.
+6. If `package-lock.json` shows huge churn (deep transitive bumps), commit it in the same commit as `package.json` — never split lockfile changes from manifest changes.
 
 **Validation.**
 
-- `npm run test:parity` → still 5/5 green. (Again, parity boots the HTTP relay, not the renderer; this is a "no import graph regression" smoke test only.)
-- Manual: `npm start`. Hold right-Option, speak, release — transcript types into the focused field as before. DevTools console for the dictation window must show **no** "ScriptProcessorNode deprecated" warning anymore. Open `http://localhost:3000/index.html`, connect, talk — voice playback works, mic level pill animates, transcript renders.
-- Audio quality should be identical or slightly better (the worklet thread is isolated from main-thread jank).
+- `npm run test:parity` → 5/5 green.
+- `npm start` → tray + hotkey + dictation all work end-to-end.
+- Electron DevTools shows no module-resolution errors on either window.
 
-**Why medium, not small.** Two files swap their audio pipeline. Worklets have a real cognitive overhead (separate global scope, no closures over outer variables, `port.postMessage` instead of direct returns). The risk is silent — if the worklet's `process()` returns the wrong value or posts the wrong shape, mic audio dies but nothing throws.
+**Why "small-risky".** The code diff is tiny (just `package.json` + `package-lock.json`), but Electron major bumps can break native modules silently. Run `electron-rebuild`. If something breaks, prefer reverting to the previous version of *that one dep* rather than holding up the whole pass.
 
 **Risk notes.**
 
-1. **`addModule` returns a Promise — await it.** Calling `new AudioWorkletNode(...)` before the module is registered throws synchronously.
-2. **Worklet code cannot use `import`.** It's a standalone script loaded into the `AudioWorkletGlobalScope`. Helpers must be inlined or accessed via `processorOptions`.
-3. **`process()` must return `true`** for the worklet to keep running. Returning `false` (or nothing) kills it permanently.
-4. **Frame size differs from `ScriptProcessorNode`.** Worklets always get 128-sample frames (~2.7ms at 48kHz). The old code got 4096-sample frames (~85ms). The downsampler + WebSocket-send rate will change accordingly — batching inside the worklet (accumulate frames until N samples, then post) is recommended to keep WebSocket message volume sane. Aim for ~50–100ms chunks post-downsample.
-5. **AudioWorklet requires the AudioContext to be running.** The existing code already calls `audioContext.resume()` — leave that intact.
+1. **Native modules are the failure mode.** `uiohook-napi` (global keyboard listener) and `@nut-tree-fork/nut-js` (keyboard typing) are NAPI-based. They typically tolerate Electron bumps better than pure native modules, but still need a rebuild step.
+2. **Electron 33 → newer:** the dictation window's preload pattern (Pass 7) is forward-compatible with Electron 35+ and the eventual switch to V3 sandboxing. No anticipated regressions.
+3. **`ws` major bumps** rarely break consumer code, but parity tests will catch any wire-protocol-affecting change.
+4. **Lock file commit policy:** if `npm install` updates `package-lock.json` deeply (it usually does on a bump), commit it. Do not gitignore it.
+5. **Don't bump `dotenv`** unless there's a security advisory — it's stable and risk-free to leave.
 
-**Expected commit shape:** 3 files (1 new `audio-capture-worklet.js`, 2 modified). ~+90 / ~−40 LoC.
+**Expected commit shape:** 2 files (`package.json` + `package-lock.json`). The lockfile diff will dominate — that's normal.
 
-**Heuristic call after this pass:** medium pass touching two renderer files plus a new worklet. The next pass (9, deps refresh) shares no code context — it's a `package.json` job. Recommend **new window** after Pass 8 lands; print the Continuation prompt block.
+**Heuristic call after this pass:** small-risky pass touching only `package.json` and the lockfile — no source code context shared with what came before, AND no source code context needed for the next pass (10, JSDoc types, which is `src/*` + `realtime-relay.js`). The pass-9 work is self-contained. Recommend **`ok`** to continue (cache is cheap when the diff is just a lockfile).
 
 ## Continuation prompt (paste into a fresh window)
 
