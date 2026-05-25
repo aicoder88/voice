@@ -37,8 +37,8 @@ The recommendation heuristic is documented next to the Status table. Honor it un
 | 4 | Split `realtime-relay.js` into providers | ✅ done | `1a61d04` | **large** |
 | 5 | Move `whisper-server` boot into whisper-local provider | ✅ done | `9546233` | medium |
 | 6 | Split `public/realtime-voice-agent.js` | ✅ done | `500d6c6` | **large** |
-| 7 | Electron security: preload bridge + `contextIsolation: true` for dictation window (was M1) | ⏭ next | — | medium |
-| 8 | `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent (was M2) | ⏭ planned | — | medium |
+| 7 | Electron security: preload bridge + `contextIsolation: true` for dictation window (was M1) | ✅ done | `7218b9f` | medium |
+| 8 | `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent (was M2) | ⏭ next | — | medium |
 | 9 | Dependency refresh: latest Electron, `ws`, `uiohook-napi`, `@nut-tree-fork/nut-js` (was M3) | ⏭ planned | — | small-risky |
 | 10 | `// @ts-check` + JSDoc types across `src/*` and `realtime-relay.js` (was M4) | ⏭ planned | — | medium |
 
@@ -53,45 +53,47 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 7 — Electron security: preload bridge + `contextIsolation: true` for the dictation window
+### Pass 8 — `AudioWorklet` replaces `ScriptProcessorNode` in dictation + realtime-voice-agent
 
-**Status quo.** `main.js:114–121` creates the dictation `BrowserWindow` with `contextIsolation: false, nodeIntegration: true`. That gives the renderer (`public/dictation.js`) direct access to Node — it currently does `import { ipcRenderer } from "electron"` at the top of the file. The other two windows (`mainWindow` at main.js:55–62 and `pillWindow` at main.js:84–97) already use the safe pattern (`contextIsolation: true, nodeIntegration: false`).
+**Status quo.** Two renderer files use the deprecated `ScriptProcessorNode`:
 
-**Goal.** Flip the dictation window to the safe pattern, route all renderer↔main IPC through a narrow `contextBridge` API exposed by a new `preload.cjs`.
+- `public/dictation.js:147` — `audioContext.createScriptProcessor(4096, 1, 1)`, downsamples mic → 24kHz PCM16, sends via WebSocket.
+- `public/realtime-voice-agent.js:203` — same shape, plus a side-effect to update a UI mic-level pill.
 
-**Steps.**
+`ScriptProcessorNode` runs the audio callback on the main thread, which Chrome has been warning about for years (`(deprecated)` in DevTools, glitchy under load). `AudioWorklet` is the modern replacement: the per-buffer code runs in a dedicated `AudioWorkletGlobalScope` thread and communicates with the main thread via `MessagePort`.
 
-1. Audit every `ipcRenderer.*` and `import ... from "electron"` site in `public/dictation.js`. Build the exhaustive channel list (likely small: `dictation:error`, `dictation:result`, lifecycle pings — confirm by grep before writing the bridge).
-2. Create `preload.cjs` (CommonJS, alongside `main.js`). Use `contextBridge.exposeInMainWorld("dictationBridge", { ... })`. Expose:
-   - `sendError(message)` → wraps `ipcRenderer.send("dictation:error", message)`.
-   - `sendResult(text)` (or whatever channels the audit reveals).
-   - `onWindowEvent(callback)` if the renderer subscribes to anything from main.
-   - **No raw `ipcRenderer`**, no `require`, no `process`.
-3. Update `main.js:114–121` to `contextIsolation: true, nodeIntegration: false, preload: path.join(__dirname, "preload.cjs")`. Add `path` import if not present.
-4. Update `public/dictation.js`:
-   - Remove `import { ipcRenderer } from "electron"` (and any other Node imports).
-   - Replace every `ipcRenderer.send(...)` call with the corresponding `window.dictationBridge.*` call.
-   - Confirm the file is now pure browser code (loadable in a regular browser tab too, modulo the bridge being absent).
-5. Add `preload.cjs` to the `build.files` list in `package.json` so `electron-builder` includes it in packaged builds.
+**Goal.** Move the per-buffer audio capture to a shared `AudioWorklet` module, used by both renderers, with zero observable behavior change.
+
+**Recommended split.**
+
+- `public/audio-capture-worklet.js` (new) — a single `AudioWorkletProcessor` subclass. Receives mono Float32 input frames in `process()`, posts them back to the main thread via `this.port.postMessage(...)`. Keeps zero state besides what's needed for the buffer hop. The downsampling + Int16 conversion can either happen inside the worklet (cleaner; one message = one ready-to-send PCM16 chunk) or in the main thread after `port.onmessage` (simpler; the worklet just relays). **Recommend in-worklet conversion** — it keeps the per-message payload small and the main thread idle.
+- `public/realtime-voice-agent/audio-utils.js` (existing) — keep the pure helpers (`downsample`, `floatTo16BitPcm`, `arrayBufferToBase64`, `base64ToInt16Array`) where they are. The worklet duplicates `downsample` + `floatTo16BitPcm` inline because worklets cannot use ES imports the way main-thread modules can — they're registered via `audioContext.audioWorklet.addModule(url)` and loaded in their own scope. Duplicating those ~15 LoC is the documented pattern; do not try to share via `import`.
+- `public/dictation.js` — replace the `createScriptProcessor` block (lines 147–162) with:
+  1. `await audioContext.audioWorklet.addModule("/audio-capture-worklet.js")` (once per AudioContext).
+  2. Create an `AudioWorkletNode(audioContext, "audio-capture-processor", { processorOptions: { inputRate: audioContext.sampleRate, outputRate: targetSampleRate } })`.
+  3. Wire `source → workletNode → muteNode → destination` (same graph topology).
+  4. `workletNode.port.onmessage = (e) => socket.send(JSON.stringify({ type: "input_audio_buffer.append", audio: arrayBufferToBase64(e.data) }))`.
+- `public/realtime-voice-agent.js` — same swap. The mic-level pill update (`this.updateMicLevel(input)`) currently runs in the audio callback. Move it to the `port.onmessage` handler — it only needs the peak of the chunk, which the worklet can compute and include in the message (or send the raw Float32 alongside the PCM16 if the size is fine). **Recommend** the worklet includes a `peak` float in each message so the main thread does no audio math.
 
 **Validation.**
 
-- `npm run test:parity` → still 5/5 green. (Parity tests run the server + WebSocket relay; they do not exercise Electron, so this is a smoke test for "we didn't break the import graph," not a real verification of the migration.)
-- Manual: `npm start`. The tray opens, the pill window shows, holding the right Option key triggers dictation, the dictation window receives transcribed text, and errors surface in the title bar.
-- DevTools console for the dictation window must be clean — no "ipcRenderer is undefined", no CSP warnings, no "contextBridge already exposed" errors.
+- `npm run test:parity` → still 5/5 green. (Again, parity boots the HTTP relay, not the renderer; this is a "no import graph regression" smoke test only.)
+- Manual: `npm start`. Hold right-Option, speak, release — transcript types into the focused field as before. DevTools console for the dictation window must show **no** "ScriptProcessorNode deprecated" warning anymore. Open `http://localhost:3000/index.html`, connect, talk — voice playback works, mic level pill animates, transcript renders.
+- Audio quality should be identical or slightly better (the worklet thread is isolated from main-thread jank).
 
-**Why medium, not small.** The change spans `main.js` + a new `preload.cjs` + `public/dictation.js` + `package.json`, and the renderer-side rewrite has to touch every IPC site without regressions. The "find every channel" audit is the part that can hide bugs — miss one channel and dictation silently drops error messages.
+**Why medium, not small.** Two files swap their audio pipeline. Worklets have a real cognitive overhead (separate global scope, no closures over outer variables, `port.postMessage` instead of direct returns). The risk is silent — if the worklet's `process()` returns the wrong value or posts the wrong shape, mic audio dies but nothing throws.
 
 **Risk notes.**
 
-1. **Preload is CommonJS.** The project is `"type": "module"`, so `preload.cjs` (not `.js`) is required, and it must use `require("electron")`, not `import`. Don't try to make it ESM; Electron's preload loader is still CJS-only as of Electron 33.
-2. **`contextBridge` only serializes structured-cloneable values.** If any IPC payload contains functions or class instances, they have to be wrapped/unwrapped. The audit step catches this.
-3. **`__dirname` works in `main.js` here.** Confirm by reading the top of `main.js` — if it's already importing `fileURLToPath` to derive `__dirname`, use the existing constant.
-4. **No behavior change visible to the user.** This is hardening, not a feature.
+1. **`addModule` returns a Promise — await it.** Calling `new AudioWorkletNode(...)` before the module is registered throws synchronously.
+2. **Worklet code cannot use `import`.** It's a standalone script loaded into the `AudioWorkletGlobalScope`. Helpers must be inlined or accessed via `processorOptions`.
+3. **`process()` must return `true`** for the worklet to keep running. Returning `false` (or nothing) kills it permanently.
+4. **Frame size differs from `ScriptProcessorNode`.** Worklets always get 128-sample frames (~2.7ms at 48kHz). The old code got 4096-sample frames (~85ms). The downsampler + WebSocket-send rate will change accordingly — batching inside the worklet (accumulate frames until N samples, then post) is recommended to keep WebSocket message volume sane. Aim for ~50–100ms chunks post-downsample.
+5. **AudioWorklet requires the AudioContext to be running.** The existing code already calls `audioContext.resume()` — leave that intact.
 
-**Expected commit shape:** 4 files (1 new `preload.cjs`, 3 modified). ~+60 / ~−15 LoC.
+**Expected commit shape:** 3 files (1 new `audio-capture-worklet.js`, 2 modified). ~+90 / ~−40 LoC.
 
-**Heuristic call after this pass:** medium pass that mostly touches Electron-side files (`main.js`, `preload.cjs`, `dictation.js`) — the next pass (8, AudioWorklet) touches `dictation.js` again *and* `realtime-voice-agent.js`. Some shared context. Recommend **`ok`** to continue.
+**Heuristic call after this pass:** medium pass touching two renderer files plus a new worklet. The next pass (9, deps refresh) shares no code context — it's a `package.json` job. Recommend **new window** after Pass 8 lands; print the Continuation prompt block.
 
 ## Continuation prompt (paste into a fresh window)
 
