@@ -117,9 +117,10 @@ function createDictationWindow() {
     show: false,
     skipTaskbar: true,
     webPreferences: {
-      contextIsolation: false,
-      nodeIntegration: true,
-      sandbox: false
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, "preload.cjs")
     }
   });
   dictationWindow.webContents.on("console-message", (_e, level, message) => {

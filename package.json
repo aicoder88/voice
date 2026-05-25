@@ -27,6 +27,7 @@
     "productName": "Voice Dictation",
     "files": [
       "main.js",
+      "preload.cjs",
       "server.js",
       "realtime-relay.js",
       "src/**/*",

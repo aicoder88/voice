@@ -1,5 +1,3 @@
-const { ipcRenderer } = require("electron");
-
 const targetSampleRate = 24000;
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
@@ -100,7 +98,7 @@ function handleRealtimeEvent(msg) {
 
   if (t === "error" || t === "local.error") {
     log("Error: " + JSON.stringify(msg));
-    ipcRenderer.send("dictation:error", msg.error?.message || msg.message || "unknown error");
+    window.dictationBridge.sendError(msg.error?.message || msg.message || "unknown error");
   }
 }
 
@@ -109,7 +107,7 @@ function finalizeAndSend(text) {
   if (!text || !text.trim()) return;
   alreadyFinalized = true;
   log("Final: " + text);
-  ipcRenderer.send("dictation:transcript", text);
+  window.dictationBridge.sendTranscript(text);
   transcriptParts = [];
 }
 
@@ -120,7 +118,7 @@ async function startRecording() {
     await ensureSocket();
   } catch {
     setStatus("WS failed");
-    ipcRenderer.send("dictation:error", "Could not connect to relay");
+    window.dictationBridge.sendError("Could not connect to relay");
     return;
   }
 
@@ -137,7 +135,7 @@ async function startRecording() {
     });
   } catch (error) {
     setStatus("Mic blocked");
-    ipcRenderer.send("dictation:error", "Microphone not available: " + error.message);
+    window.dictationBridge.sendError("Microphone not available: " + error.message);
     return;
   }
 
@@ -203,8 +201,8 @@ function stopRecording() {
   }, FALLBACK_MS);
 }
 
-ipcRenderer.on("dictation:start", () => startRecording());
-ipcRenderer.on("dictation:stop", () => stopRecording());
+window.dictationBridge.onStart(() => startRecording());
+window.dictationBridge.onStop(() => stopRecording());
 
 function downsample(input, inputRate, outputRate) {
   if (inputRate === outputRate) return input;
