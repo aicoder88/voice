@@ -143,18 +143,20 @@ async function startRecording() {
   alreadyFinalized = false;
   isRecording = true;
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
-  processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+  await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+  processorNode = new AudioWorkletNode(audioContext, "audio-capture-processor", {
+    processorOptions: { outputRate: targetSampleRate }
+  });
   muteNode = audioContext.createGain();
   muteNode.gain.value = 0;
 
-  processorNode.onaudioprocess = (event) => {
+  processorNode.port.onmessage = (event) => {
     if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
-    const input = event.inputBuffer.getChannelData(0);
-    const pcm16 = floatTo16BitPcm(downsample(input, audioContext.sampleRate, targetSampleRate));
+    const { pcm16 } = event.data;
     socket.send(
       JSON.stringify({
         type: "input_audio_buffer.append",
-        audio: arrayBufferToBase64(pcm16.buffer.slice(pcm16.byteOffset, pcm16.byteOffset + pcm16.byteLength))
+        audio: arrayBufferToBase64(pcm16)
       })
     );
   };
@@ -203,26 +205,6 @@ function stopRecording() {
 
 window.dictationBridge.onStart(() => startRecording());
 window.dictationBridge.onStop(() => stopRecording());
-
-function downsample(input, inputRate, outputRate) {
-  if (inputRate === outputRate) return input;
-  const ratio = inputRate / outputRate;
-  const length = Math.floor(input.length / ratio);
-  const output = new Float32Array(length);
-  for (let i = 0; i < length; i += 1) {
-    output[i] = input[Math.floor(i * ratio)];
-  }
-  return output;
-}
-
-function floatTo16BitPcm(float32Array) {
-  const pcm16 = new Int16Array(float32Array.length);
-  for (let i = 0; i < float32Array.length; i += 1) {
-    const sample = Math.max(-1, Math.min(1, float32Array[i]));
-    pcm16[i] = sample < 0 ? sample * 32768 : sample * 32767;
-  }
-  return pcm16;
-}
 
 function arrayBufferToBase64(buffer) {
   let binary = "";

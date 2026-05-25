@@ -7,9 +7,7 @@ import {
 } from "./realtime-voice-agent/agents.js";
 import {
   arrayBufferToBase64,
-  base64ToInt16Array,
-  downsample,
-  floatTo16BitPcm
+  base64ToInt16Array
 } from "./realtime-voice-agent/audio-utils.js";
 import { renderTemplate } from "./realtime-voice-agent/template.js";
 
@@ -200,22 +198,24 @@ class RealtimeVoiceAgent extends HTMLElement {
     }
 
     this.sourceNode = this.audioContext.createMediaStreamSource(this.mediaStream);
-    this.processorNode = this.audioContext.createScriptProcessor(4096, 1, 1);
+    await this.audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+    this.processorNode = new AudioWorkletNode(this.audioContext, "audio-capture-processor", {
+      processorOptions: { outputRate: targetSampleRate }
+    });
     this.muteNode = this.audioContext.createGain();
     this.muteNode.gain.value = 0;
     this.audioChunksSent = 0;
     this.audioFramesSeen = 0;
     this.isRecording = true;
 
-    this.processorNode.onaudioprocess = (event) => {
+    this.processorNode.port.onmessage = (event) => {
       if (!this.isRecording || this.socket?.readyState !== WebSocket.OPEN) return;
-      const input = event.inputBuffer.getChannelData(0);
-      this.updateMicLevel(input);
-      const pcm16 = floatTo16BitPcm(downsample(input, this.audioContext.sampleRate, targetSampleRate));
+      const { pcm16, peak } = event.data;
+      this.updateMicLevel(peak);
       this.sendEvent(
         {
           type: "input_audio_buffer.append",
-          audio: arrayBufferToBase64(pcm16.buffer.slice(pcm16.byteOffset, pcm16.byteOffset + pcm16.byteLength))
+          audio: arrayBufferToBase64(pcm16)
         },
         false
       );
@@ -404,14 +404,9 @@ class RealtimeVoiceAgent extends HTMLElement {
     }
   }
 
-  updateMicLevel(samples) {
+  updateMicLevel(peak) {
     this.audioFramesSeen += 1;
     if (this.audioFramesSeen % 4 !== 0) return;
-
-    let peak = 0;
-    for (let i = 0; i < samples.length; i += 1) {
-      peak = Math.max(peak, Math.abs(samples[i]));
-    }
     this.levelStatus.textContent = `${Math.min(100, Math.round(peak * 160))}%`;
   }
 
