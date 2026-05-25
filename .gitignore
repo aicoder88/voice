@@ -1,6 +1,13 @@
 node_modules/
 .env
+*.bak
 .DS_Store
 AGENTS.md
 OPENAI_KEY_AUDIT.md
 npm-debug.log*
+
+# whisper.cpp model weights — fetched per machine, not tracked
+models/
+
+# parity harness recorded fixtures stay in-tree (see scripts/parity/fixtures/)
+

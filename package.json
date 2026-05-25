@@ -7,7 +7,9 @@
   "scripts": {
     "dev": "node server.js",
     "start": "electron .",
-    "build": "electron-builder"
+    "build": "electron-builder",
+    "test:parity": "node --test --test-force-exit scripts/parity/dictation-flow.test.js",
+    "test:cleanup": "node scripts/cleanup-test.js"
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
