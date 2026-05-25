@@ -30,8 +30,8 @@ You then either type `ok`, or open a new Claude Code session in this repo and pa
 | # | Pass | Status | SHA | Size |
 |---|------|--------|-----|------|
 | 0 | Scaffolding (docs + parity harness + dead-file purge) | ✅ done | `48754b2` | medium |
-| 1 | Fix platform-wrong error string + remove dead `preload.cjs` reference | ⏭ next | — | small |
-| 2 | De-duplicate transcription-only model set | pending | — | small |
+| 1 | Fix platform-wrong error string + remove dead `preload.cjs` reference | ✅ done | `cb490ee` | small |
+| 2 | De-duplicate transcription-only model set | ⏭ next | — | small |
 | 3 | Encapsulate dictation session state | pending | — | small |
 | 4 | Split `realtime-relay.js` into providers | pending | — | **large** |
 | 5 | Move `whisper-server` boot into whisper-local provider | pending | — | medium |
@@ -44,21 +44,22 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 1 — fix platform-wrong error string + remove dead `preload.cjs` reference
+### Pass 2 — de-duplicate transcription-only model set
 
-**Files:** `main.js`
+**Files:** `realtime-relay.js`, `public/dictation.js`
 
 **Changes:**
 
-1. `main.js:94` — `serverError = "Missing OPENAI_API_KEY in C:\\dev\\voice\\.env"` hardcodes a Windows path. Replace with a platform-neutral message that names the actual `.env` location (`<repo>/.env`).
-2. `main.js:17` — `const preloadPath = join(__dirname, "preload.cjs")` followed by `existsSync(preloadPath) ? preloadPath : undefined` at line 117. `preload.cjs` does not exist; reference is dead. Remove both lines.
+1. `realtime-relay.js:67` — extract `const TRANSCRIPTION_ONLY_MODELS = new Set([...])` to module scope and `export` it. The relay's OpenAI branch already uses it to decide between conversation mode and transcription-only mode.
+2. `public/dictation.js:46-62` — remove the redundant `session.update` send. The relay already synthesizes the correct `session.update` on upstream open (see `realtime-relay.js:80-104`). The browser sending another one is dead since both currently agree, and is a maintenance trap.
+3. `public/dictation.js:41` — the browser hard-codes `?model=gpt-realtime-whisper` for the OpenAI path. That's fine to keep as the dictation default, but add a short comment pointing readers to `RELAY_PROTOCOL.md` for the canonical list of transcription-only model names.
 
 **Validation:**
 
-- `npm run test:parity` → still 4/4 green.
-- Manual: temporarily unset `OPENAI_API_KEY`, `npm start`, confirm setup window shows a platform-neutral path (no `C:\\`).
+- `npm run test:parity` → 4/4 green. Specifically the OpenAI test must still pass, since the protocol-frame sequence (`session.update` from browser, or not) is part of the wire contract.
+- Manual: `npm start`, hold the hotkey, dictate a phrase, confirm transcription still arrives.
 
-**Expected commit shape:** one file, ~6 lines changed.
+**Expected commit shape:** two files, ~25 lines changed (mostly deletions in `dictation.js`).
 
 ## Continuation prompt (paste into a fresh window)
 

@@ -10,11 +10,10 @@ process.on("unhandledRejection", (reason) => {
 });
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { existsSync } from "node:fs";
 import { startServer } from "./server.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const preloadPath = join(__dirname, "preload.cjs");
+const envPath = join(__dirname, ".env");
 
 let mainWindow = null;
 let pillWindow = null;
@@ -91,7 +90,7 @@ async function waitForServer(baseUrl, timeoutMs, abortCheck) {
 
 async function bootRelayServer() {
   if (!process.env.OPENAI_API_KEY) {
-    serverError = "Missing OPENAI_API_KEY in C:\\dev\\voice\\.env";
+    serverError = `Missing OPENAI_API_KEY in ${envPath}`;
     return null;
   }
   try {
@@ -113,8 +112,7 @@ function createMainWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true,
-      preload: existsSync(preloadPath) ? preloadPath : undefined
+      sandbox: true
     }
   });
 
