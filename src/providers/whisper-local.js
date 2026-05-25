@@ -3,6 +3,11 @@
 // the browser commits, then either POSTs a WAV to a long-running
 // whisper-server (if WHISPER_SERVER_URL is set; ~10–100x faster) or shells
 // out to whisper-cli on a tempfile (fallback).
+//
+// The whisper-server child process is owned by this module: lazily spawned on
+// the first attach() and torn down via a process-exit handler. This keeps the
+// relay self-sufficient regardless of host (Electron, plain `npm run dev`,
+// or the parity harness).
 
 import { spawn } from "node:child_process";
 import { writeFile, unlink, mkdtemp } from "node:fs/promises";
@@ -16,11 +21,99 @@ const SAMPLE_RATE = 24000;
 // return an empty string immediately.
 const MIN_PCM_BYTES = 4800; // 0.1s @ 24 kHz mono int16
 
-export function attach(clientSocket, { bin, model }) {
+let whisperServerProc = null;
+let whisperServerReady = null;
+let exitHandlerInstalled = false;
+
+function ensureWhisperServer(bin) {
+  if (whisperServerReady) return whisperServerReady;
+
+  const serverBin = bin ? bin.replace(/-cli$/, "-server") : "whisper-server";
+  const model = process.env.WHISPER_MODEL || "./models/ggml-base.en.bin";
+  const port = process.env.WHISPER_PORT || "8081";
+  const baseUrl = `http://127.0.0.1:${port}`;
+
+  whisperServerReady = (async () => {
+    const args = [
+      "-m", model,
+      "--host", "127.0.0.1",
+      "--port", port,
+      "-t", "4",
+      "--no-fallback"
+    ];
+    let spawnError = null;
+    whisperServerProc = spawn(serverBin, args);
+    whisperServerProc.on("error", (err) => {
+      spawnError = err;
+      console.error("[whisper-server] spawn error:", err.message);
+      whisperServerProc = null;
+    });
+    whisperServerProc.stderr?.on("data", (d) => {
+      const s = d.toString();
+      if (/error|fail/i.test(s)) console.error("[whisper-server]", s.trim());
+    });
+    whisperServerProc.on("exit", (code) => {
+      console.error("[whisper-server] exited with code " + code);
+      whisperServerProc = null;
+    });
+
+    if (!exitHandlerInstalled) {
+      exitHandlerInstalled = true;
+      process.on("exit", () => {
+        if (whisperServerProc) {
+          try { whisperServerProc.kill("SIGTERM"); } catch {}
+        }
+      });
+    }
+
+    process.env.WHISPER_SERVER_URL = `${baseUrl}/inference`;
+
+    await waitForServer(baseUrl, 10000, () => spawnError || (whisperServerProc === null ? new Error("whisper-server died before ready") : null));
+    console.error("[whisper-server] ready at " + process.env.WHISPER_SERVER_URL);
+  })();
+
+  whisperServerReady.catch(() => {
+    // Reset so a later attach() can retry instead of inheriting the failure.
+    whisperServerReady = null;
+  });
+
+  return whisperServerReady;
+}
+
+async function waitForServer(baseUrl, timeoutMs, abortCheck) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    const fatal = abortCheck && abortCheck();
+    if (fatal) throw fatal;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 500);
+      try {
+        const res = await fetch(baseUrl, { signal: ctrl.signal });
+        if (res.status < 600) return;
+      } finally {
+        clearTimeout(timer);
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  throw new Error("whisper-server did not start within " + timeoutMs + "ms");
+}
+
+export async function attach(clientSocket, { bin, model }) {
   const audioChunks = [];
   let chunkCount = 0;
 
   console.error("[relay] whisper-local session opened");
+
+  try {
+    await ensureWhisperServer(bin);
+  } catch (err) {
+    console.error("[relay] whisper-server boot failed, will use CLI fallback:", err.message);
+  }
+
+  if (clientSocket.readyState !== clientSocket.OPEN) return;
+
   sendToClient(clientSocket, { type: "local.status", status: "connected", provider: "whisper-local", model });
 
   clientSocket.on("message", async (message) => {

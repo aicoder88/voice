@@ -256,8 +256,11 @@ test("parity: whisper-local completes one utterance", async (t) => {
   await ready;
   t.after(() => ws.close());
 
-  await waitFor(() =>
-    frames.some((f) => f.type === "local.status" && f.status === "connected")
+  // The provider lazily boots whisper-server on first connect; cold start can
+  // take several seconds before the connected frame fires.
+  await waitFor(
+    () => frames.some((f) => f.type === "local.status" && f.status === "connected"),
+    { timeoutMs: 60000 }
   );
 
   streamFixture(ws, chunks);

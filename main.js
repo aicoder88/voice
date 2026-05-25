@@ -1,6 +1,5 @@
 import "dotenv/config";
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen } from "electron";
-import { spawn } from "node:child_process";
 
 process.on("uncaughtException", (err) => {
   console.error("[uncaughtException]", err && err.stack ? err.stack : err);
@@ -23,7 +22,6 @@ let tray = null;
 let serverPort = null;
 let serverError = null;
 let hotkeyEngine = null;
-let whisperServerProc = null;
 const dictation = new DictationSession();
 
 const TRAY_PNG_BASE64 =
@@ -36,58 +34,6 @@ function makeTrayIcon() {
     if (!img.isEmpty()) return img;
   } catch {}
   return nativeImage.createEmpty();
-}
-
-async function bootWhisperServer() {
-  if ((process.env.STT_PROVIDER || "").toLowerCase() !== "whisper-local") return;
-  const bin = process.env.WHISPER_CLI ? process.env.WHISPER_CLI.replace(/-cli$/, "-server") : "whisper-server";
-  const model = process.env.WHISPER_MODEL || "./models/ggml-base.en.bin";
-  const port = process.env.WHISPER_PORT || "8081";
-  const args = [
-    "-m", model,
-    "--host", "127.0.0.1",
-    "--port", port,
-    "-t", "4",
-    "--no-fallback"
-  ];
-  whisperServerProc = spawn(bin, args);
-  let spawnError = null;
-  whisperServerProc.on("error", (err) => {
-    spawnError = err;
-    console.error("[whisper-server] spawn error:", err.message);
-    whisperServerProc = null;
-  });
-  whisperServerProc.stderr?.on("data", (d) => {
-    const s = d.toString();
-    if (/error|fail/i.test(s)) console.error("[whisper-server]", s.trim());
-  });
-  whisperServerProc.on("exit", (code) => {
-    console.error("[whisper-server] exited with code " + code);
-    whisperServerProc = null;
-  });
-  process.env.WHISPER_SERVER_URL = `http://127.0.0.1:${port}/inference`;
-  await waitForServer(`http://127.0.0.1:${port}`, 10000, () => spawnError || (whisperServerProc === null ? new Error("whisper-server died before ready") : null));
-  console.error("[whisper-server] ready at " + process.env.WHISPER_SERVER_URL);
-}
-
-async function waitForServer(baseUrl, timeoutMs, abortCheck) {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
-    const fatal = abortCheck && abortCheck();
-    if (fatal) throw fatal;
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 500);
-      try {
-        const res = await fetch(baseUrl, { signal: ctrl.signal });
-        if (res.status < 600) return;
-      } finally {
-        clearTimeout(timer);
-      }
-    } catch {}
-    await new Promise((r) => setTimeout(r, 200));
-  }
-  throw new Error("whisper-server did not start within " + timeoutMs + "ms");
 }
 
 async function bootRelayServer() {
@@ -350,7 +296,6 @@ function buildAppMenu() {
 }
 
 app.whenReady().then(async () => {
-  try { await bootWhisperServer(); } catch (e) { console.error("[main] whisper-server failed:", e.message); }
   await bootRelayServer();
   buildAppMenu();
   createMainWindow();
@@ -379,8 +324,5 @@ app.on("before-quit", () => {
   app.isQuitting = true;
   if (hotkeyEngine && typeof hotkeyEngine.stop === "function") {
     try { hotkeyEngine.stop(); } catch {}
-  }
-  if (whisperServerProc) {
-    try { whisperServerProc.kill("SIGTERM"); } catch {}
   }
 });
