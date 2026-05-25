@@ -33,9 +33,9 @@ You then either type `ok`, or open a new Claude Code session in this repo and pa
 | 1 | Fix platform-wrong error string + remove dead `preload.cjs` reference | ✅ done | `32507f3` | small |
 | 2 | De-duplicate transcription-only model set | ✅ done | `c505926` | small |
 | 3 | Encapsulate dictation session state | ✅ done | `125e98b` | small |
-| 4 | Split `realtime-relay.js` into providers | ✅ done | _next-pass fills in_ | **large** |
-| 5 | Move `whisper-server` boot into whisper-local provider | ⏭ next | — | medium |
-| 6 | Split `public/realtime-voice-agent.js` | pending | — | **large** |
+| 4 | Split `realtime-relay.js` into providers | ✅ done | `1a61d04` | **large** |
+| 5 | Move `whisper-server` boot into whisper-local provider | ✅ done | `9546233` | medium |
+| 6 | Split `public/realtime-voice-agent.js` | ⏭ next | — | **large** |
 
 Recommendation heuristic for `ok` vs new window:
 
@@ -44,42 +44,41 @@ Recommendation heuristic for `ok` vs new window:
 
 ## Next pass — details
 
-### Pass 5 — move `whisper-server` child-process boot into the whisper-local provider
+### Pass 6 — split `public/realtime-voice-agent.js`
 
-**Files:**
+`public/realtime-voice-agent.js` is 726 lines: defaults + huge HTML/CSS template + WebSocket lifecycle + audio capture/playback + DOM event wiring + pure helpers all in one file. The public surface is the `<realtime-voice-agent>` custom element and its attributes (`endpoint`, `agent`, `compact`, `instructions`, `autoconnect`) — none of that changes.
 
-- `main.js` — delete `bootWhisperServer`, `waitForServer`, and the call site in `app.whenReady`. Also delete the `whisperServerProc` global and its `before-quit` cleanup.
-- `src/providers/whisper-local.js` — own the child-process boot. Lazy-start on first connection. Set `process.env.WHISPER_SERVER_URL` once ready (matching today's handoff). Cleanup on process exit.
+**Public-API constraint:**
 
-**Why this is medium not small:**
+The file is loaded by callers as `<script type="module" src="realtime-voice-agent.js"></script>` (check `public/index.html` and `public/setup.html` to confirm). The path `public/realtime-voice-agent.js` MUST remain — it is the entry point and the file that registers the custom element via `customElements.define(...)`. The split is internal: extracted modules live under `public/realtime-voice-agent/` and are imported relatively.
 
-The whisper-server lifetime currently spans the entire Electron app (boot at `whenReady`, kill at `before-quit`). Moving it into the provider means the first browser→relay connection triggers the boot — and that connection must wait for the server to be reachable before the relay starts feeding it audio. The provider's `attach()` becomes async-aware: it can't return immediately if the server is still starting.
+Before extracting anything, **read `public/index.html` and `public/setup.html`** to confirm both pages load this file as a module. If either uses a classic `<script>` tag, the file has to remain self-contained (no `import`) — in that case, fall back to a single-file refactor that just collapses the giant `render()` template into a top-level template-literal constant.
 
-Two reasonable shapes:
+**Recommended split (assuming module loading):**
 
-1. **Lazy + per-process singleton:** the provider boots the server once and caches the promise; subsequent attach calls await the same promise. Tracks the child process at module scope so a single SIGTERM handler in the module cleans it up at exit. _Cleanest. Recommended._
-2. **Eager from realtime-relay.js:** the relay boots the server during `attachRealtimeRelay()` if `STT_PROVIDER=whisper-local`. Closer to today's behavior but couples the relay to provider internals.
+- `public/realtime-voice-agent/audio-utils.js` — `downsample`, `floatTo16BitPcm`, `arrayBufferToBase64`, `base64ToInt16Array`. Pure functions, no DOM. ~40 LoC.
+- `public/realtime-voice-agent/agents.js` — `defaultAgents`, `agentLabels`, `personalityStorageKey`, plus a `loadPersonalities()` / `savePersonalities()` pair that wraps `localStorage`. ~50 LoC.
+- `public/realtime-voice-agent/template.js` — exports a single `templateHTML` string (or a `renderTemplate(root)` function that sets `root.innerHTML` and returns a `$` helper to query the shadow tree). Hosts the long HTML + `<style>` block currently embedded in `render()`. ~250 LoC.
+- `public/realtime-voice-agent.js` — keeps the `RealtimeVoiceAgent` class, the `customElements.define` call, the `targetSampleRate` constant, and `connectedCallback`/`disconnectedCallback`/`connect()`/`updateSession()`/playback/mic-level methods. Imports from the three new modules. ~350 LoC after extraction.
 
-Go with option 1.
+**Why this is large:**
 
-**Changes:**
-
-1. New module-scope state in `src/providers/whisper-local.js`:
-   - `let whisperServerProc = null;`
-   - `let whisperServerReady = null;` (Promise; cached on first call)
-   - `function ensureWhisperServer()` — spawns `whisper-server`, polls until `http://127.0.0.1:<port>` answers, sets `process.env.WHISPER_SERVER_URL`. Returns the cached promise on subsequent calls.
-2. `attach()` becomes async: awaits `ensureWhisperServer()` before wiring `clientSocket.on("message")`. Frames the browser sends during the boot wait are buffered (same logic that's already there for audio chunks; no change needed since the message handler isn't attached until after the await).
-3. Process-exit cleanup: register a `process.on("exit")` handler in the module that SIGTERMs the child if it's still alive. Don't rely on Electron's `before-quit`.
-4. `main.js`: delete `bootWhisperServer` + `waitForServer` + the `app.whenReady` call site + the `before-quit` whisperServerProc.kill block + the `whisperServerProc` global. Net deletion ~45 LoC.
+The HTML/CSS template alone is hundreds of lines of strings interleaved with classnames the JS reaches into via `querySelector` — extracting it means every selector used elsewhere in the file has to keep matching. The audio helpers are easy; the template is the risky part. Do them in that order so a regression caught by manual smoke can be bisected easily.
 
 **Validation:**
 
-- `npm run test:parity` → 5/5 green. The whisper-local test must specifically prove that the provider's lazy server boot works: today the test relies on `whisper-cli` CLI fallback (no WHISPER_SERVER_URL set in the test env), so after this pass the test will trigger the lazy server boot and use the server path. Bump the whisper-local sub-test timeout to 60s to cover the first-boot cold start.
-- Manual: `STT_PROVIDER=whisper-local npm start`, hold the hotkey, dictate. Server boots on first press. Quit cleanly with ⌘Q, confirm `whisper-server` is no longer in `ps`.
+- `npm run test:parity` → 5/5 green. (The component is exercised only indirectly through parity; the harness uses a raw `ws://.../realtime` client, not the custom element.)
+- Manual smoke (no automation): `npm run dev`, open `http://localhost:3000/index.html`, click into the agent UI, change personality, type instructions, press Connect, speak. Confirm: shadow DOM matches the original (visual diff), WebSocket connects, transcription frames render, voice playback plays back. Then load `setup.html` from the Electron app (`npm start`) and confirm the embedded scratchpad still works.
+- Console must be clean (no 404s for new module paths, no "customElements.define already called" if HMR-style reloads happen).
 
-**Expected commit shape:** two files, ~+90 / ~−60 LoC. No public API change.
+**Expected commit shape:** four files in `public/` (one modified, three new), ~+730 / ~−400 LoC net (template gets copy-pasted, so most "additions" are moves).
 
-**Note for the assistant executing this pass:** also backfill Pass 4's SHA into the Status table when committing (lazy SHA-fill pattern).
+**Risk notes for the executing assistant:**
+
+1. **The file is loaded by the browser, not Node.** Check the actual `<script>` tag in both HTML pages before splitting. ES modules need `type="module"` AND relative imports starting with `./`.
+2. **Don't rename or re-order DOM classnames.** Anything the existing JS does via `shadowRoot.querySelector(".foo")` must still find the same element after extraction.
+3. **`customElements.define()` must run exactly once.** Keep it at the bottom of the entry file. If the browser hot-reloads, a second `define` throws — but that's pre-existing behavior, don't try to fix it in this pass.
+4. **No behavior change.** This is a pure code-organization refactor. Do not "improve" anything along the way.
 
 ## Continuation prompt (paste into a fresh window)
 
@@ -90,7 +89,7 @@ Resume the modernization refactor for this repo.
    shows which pass is next.
 2. If you have not read them already, read docs/ARCHITECTURE.md (current-state
    map) and docs/RELAY_PROTOCOL.md (the wire contract the parity harness asserts).
-3. Run `npm run test:parity` to confirm baseline green (expect tests 4 / pass 4).
+3. Run `npm run test:parity` to confirm baseline green (expect tests 5 / pass 5).
 4. Execute the "Next pass — details" section. Match the existing commit style
    (lowercase prefix, "Co-Authored-By: Claude Opus 4.7 (1M context) <noreply@anthropic.com>").
 5. After committing, update docs/REFACTOR.md: mark the pass complete with its
