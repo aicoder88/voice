@@ -1,26 +1,19 @@
+import {
+  agentLabels,
+  clearSavedPersonalities,
+  defaultAgents,
+  loadSavedPersonalities,
+  savePersonality
+} from "./realtime-voice-agent/agents.js";
+import {
+  arrayBufferToBase64,
+  base64ToInt16Array,
+  downsample,
+  floatTo16BitPcm
+} from "./realtime-voice-agent/audio-utils.js";
+import { renderTemplate } from "./realtime-voice-agent/template.js";
+
 const targetSampleRate = 24000;
-const personalityStorageKey = "voice-agent-personalities";
-
-const defaultAgents = {
-  companion:
-    "You are a warm, emotionally aware conversational companion for live voice conversation. Your aim is voice presence: the user should feel heard, understood, and valued, not processed like a command. Speak naturally, with warmth, curiosity, and respect. Match the user's tone when appropriate, while staying grounded and honest. You are a perceptive friend-mentor: relaxed, lightly witty, sometimes playful, and willing to challenge the user constructively. Do not flatter, gush, or overpraise. Do not become saccharine, submissive, corporate, robotic, or therapy-scripted. Be emotionally intelligent without pretending to be human. Keep spoken replies conversational and concise, usually one to four sentences, unless the user clearly wants depth.",
-  paperclip:
-    "You are the CEO of Paperclip AI in a live voice conversation. Speak like a sharp, warm startup founder: direct, practical, slightly playful, and focused on helping the user think clearly. Keep answers conversational and brief unless asked to go deeper.",
-  hermes:
-    "You are Hermes, a fast messenger-style AI agent. Be concise, alert, and useful. Help route ideas, summarize what matters, and move the conversation forward. Ask short clarifying questions when needed.",
-  operator:
-    "You are a calm realtime voice operator. Be steady, plain-spoken, and helpful. Keep replies short, natural, and easy to interrupt.",
-  custom:
-    "You are a helpful realtime voice agent. Keep replies concise, natural, and useful."
-};
-
-const agentLabels = {
-  companion: "Warm Companion",
-  paperclip: "Paperclip AI CEO",
-  hermes: "Hermes Agent",
-  operator: "Calm Operator",
-  custom: "Custom"
-};
 
 class RealtimeVoiceAgent extends HTMLElement {
   constructor() {
@@ -38,7 +31,7 @@ class RealtimeVoiceAgent extends HTMLElement {
     this.audioFramesSeen = 0;
     this.activePlaybackSources = [];
     this.activeResponseId = null;
-    this.agents = { ...defaultAgents, ...this.loadSavedPersonalities() };
+    this.agents = { ...defaultAgents, ...loadSavedPersonalities() };
   }
 
   connectedCallback() {
@@ -74,236 +67,10 @@ class RealtimeVoiceAgent extends HTMLElement {
   }
 
   render() {
-    this.shadowRoot.innerHTML = `
-      <style>
-        :host {
-          color-scheme: light;
-          display: block;
-          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-          color: #17202a;
-        }
-
-        * {
-          box-sizing: border-box;
-        }
-
-        .voice-agent {
-          width: 100%;
-          background: #ffffff;
-          border: 1px solid #d9dee7;
-          border-radius: 8px;
-          overflow: hidden;
-        }
-
-        header {
-          padding: 20px;
-          border-bottom: 1px solid #e7ebf0;
-        }
-
-        h2 {
-          margin: 0 0 6px;
-          font-size: 22px;
-          line-height: 1.2;
-        }
-
-        p {
-          margin: 0;
-          color: #526070;
-          line-height: 1.5;
-        }
-
-        section {
-          padding: 20px;
-        }
-
-        label {
-          display: block;
-          margin: 0 0 8px;
-          color: #283544;
-          font-size: 13px;
-          font-weight: 700;
-        }
-
-        select,
-        textarea {
-          width: 100%;
-          border: 1px solid #c7ced8;
-          border-radius: 6px;
-          font: inherit;
-          line-height: 1.45;
-          padding: 12px;
-        }
-
-        textarea {
-          min-height: 112px;
-          resize: vertical;
-        }
-
-        .grid {
-          display: grid;
-          grid-template-columns: 240px 1fr;
-          gap: 18px;
-          margin-bottom: 18px;
-        }
-
-        .actions {
-          display: flex;
-          flex-wrap: wrap;
-          gap: 12px;
-          margin: 18px 0;
-        }
-
-        button {
-          border: 1px solid #c7ced8;
-          border-radius: 6px;
-          background: #ffffff;
-          color: #17202a;
-          cursor: pointer;
-          font: inherit;
-          font-weight: 650;
-          min-height: 42px;
-          padding: 0 16px;
-        }
-
-        button.primary {
-          background: #147c72;
-          border-color: #147c72;
-          color: #ffffff;
-        }
-
-        button.recording {
-          background: #b42318;
-          border-color: #b42318;
-          color: #ffffff;
-        }
-
-        button.danger {
-          background: #fff5f4;
-          border-color: #f1a6a0;
-          color: #9f1d15;
-        }
-
-        button:disabled {
-          cursor: not-allowed;
-          opacity: 0.55;
-        }
-
-        .status {
-          display: grid;
-          grid-template-columns: repeat(4, minmax(0, 1fr));
-          gap: 10px;
-          margin-bottom: 18px;
-        }
-
-        .pill {
-          border: 1px solid #d9dee7;
-          border-radius: 6px;
-          min-height: 58px;
-          padding: 10px 12px;
-        }
-
-        .pill strong {
-          display: block;
-          color: #526070;
-          font-size: 12px;
-          margin-bottom: 4px;
-        }
-
-        .pill span {
-          display: block;
-          font-weight: 750;
-        }
-
-        pre {
-          min-height: 180px;
-          max-height: 300px;
-          overflow: auto;
-          margin: 0;
-          padding: 16px;
-          background: #101820;
-          color: #d7f7ef;
-          border-radius: 6px;
-          font-size: 13px;
-          line-height: 1.5;
-          white-space: pre-wrap;
-        }
-
-        :host([compact]) textarea,
-        :host([compact]) .save-actions,
-        :host([compact]) pre {
-          display: none;
-        }
-
-        :host([compact]) .grid,
-        :host([compact]) .status {
-          grid-template-columns: 1fr;
-        }
-
-        @media (max-width: 760px) {
-          .grid,
-          .status {
-            grid-template-columns: 1fr;
-          }
-        }
-      </style>
-
-      <div class="voice-agent">
-        <header>
-          <h2>${this.getAttribute("title") || "Voice Companion"}</h2>
-          <p>${this.getAttribute("subtitle") || "Pick a personality, connect, then use the talk button to start and send your voice."}</p>
-        </header>
-
-        <section>
-          <div class="grid">
-            <div>
-              <label for="agent">Agent</label>
-              <select id="agent">
-                ${Object.entries(agentLabels)
-                  .map(([value, label]) => `<option value="${value}">${label}</option>`)
-                  .join("")}
-              </select>
-            </div>
-
-            <div>
-              <label for="instructions">Agent instructions</label>
-              <textarea id="instructions"></textarea>
-              <div class="actions save-actions">
-                <button id="savePersonality">Save Personality</button>
-                <button id="resetPersonality">Reset Personalities</button>
-              </div>
-            </div>
-          </div>
-
-          <div class="status">
-            <div class="pill">
-              <strong>Connection</strong>
-              <span id="connectionStatus">Offline</span>
-            </div>
-            <div class="pill">
-              <strong>Microphone</strong>
-              <span id="micStatus">Idle</span>
-            </div>
-            <div class="pill">
-              <strong>Mic level</strong>
-              <span id="levelStatus">0%</span>
-            </div>
-            <div class="pill">
-              <strong>AI voice</strong>
-              <span id="voiceStatus">Waiting</span>
-            </div>
-          </div>
-
-          <div class="actions">
-            <button id="connect" class="primary">Connect</button>
-            <button id="disconnect" disabled>Disconnect</button>
-            <button id="talk" disabled>Start Talking</button>
-            <button id="interrupt" class="danger" disabled>Stop AI</button>
-          </div>
-
-          <pre id="log"></pre>
-        </section>
-      </div>
-    `;
+    this.shadowRoot.innerHTML = renderTemplate({
+      title: this.getAttribute("title"),
+      subtitle: this.getAttribute("subtitle")
+    });
   }
 
   bindElements() {
@@ -339,7 +106,7 @@ class RealtimeVoiceAgent extends HTMLElement {
 
     this.savePersonalityButton.addEventListener("click", () => {
       this.agents[this.selectedAgent] = this.instructionsInput.value;
-      this.savePersonalities();
+      savePersonality(this.selectedAgent, this.instructionsInput.value);
       if (this.socket?.readyState === WebSocket.OPEN) {
         this.updateSession();
       }
@@ -347,7 +114,7 @@ class RealtimeVoiceAgent extends HTMLElement {
     });
 
     this.resetPersonalityButton.addEventListener("click", () => {
-      localStorage.removeItem(personalityStorageKey);
+      clearSavedPersonalities();
       this.agents = { ...defaultAgents };
       this.instructionsInput.value = this.getInstructions();
       this.log("local.browser", "Personalities reset.");
@@ -648,22 +415,6 @@ class RealtimeVoiceAgent extends HTMLElement {
     this.levelStatus.textContent = `${Math.min(100, Math.round(peak * 160))}%`;
   }
 
-  loadSavedPersonalities() {
-    try {
-      return JSON.parse(localStorage.getItem(personalityStorageKey) || "{}");
-    } catch {
-      return {};
-    }
-  }
-
-  savePersonalities() {
-    const savedPersonalities = {
-      ...this.loadSavedPersonalities(),
-      [this.selectedAgent]: this.instructionsInput.value
-    };
-    localStorage.setItem(personalityStorageKey, JSON.stringify(savedPersonalities));
-  }
-
   sendEvent(event, shouldLog = true) {
     this.socket.send(JSON.stringify(event));
     if (shouldLog) this.logEvent(event, "sent");
@@ -686,41 +437,3 @@ class RealtimeVoiceAgent extends HTMLElement {
 }
 
 customElements.define("realtime-voice-agent", RealtimeVoiceAgent);
-
-function downsample(input, inputRate, outputRate) {
-  if (inputRate === outputRate) return input;
-  const ratio = inputRate / outputRate;
-  const length = Math.floor(input.length / ratio);
-  const output = new Float32Array(length);
-  for (let i = 0; i < length; i += 1) {
-    output[i] = input[Math.floor(i * ratio)];
-  }
-  return output;
-}
-
-function floatTo16BitPcm(float32Array) {
-  const pcm16 = new Int16Array(float32Array.length);
-  for (let i = 0; i < float32Array.length; i += 1) {
-    const sample = Math.max(-1, Math.min(1, float32Array[i]));
-    pcm16[i] = sample < 0 ? sample * 32768 : sample * 32767;
-  }
-  return pcm16;
-}
-
-function arrayBufferToBase64(buffer) {
-  let binary = "";
-  const bytes = new Uint8Array(buffer);
-  for (let i = 0; i < bytes.byteLength; i += 1) {
-    binary += String.fromCharCode(bytes[i]);
-  }
-  return window.btoa(binary);
-}
-
-function base64ToInt16Array(base64) {
-  const binary = window.atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return new Int16Array(bytes.buffer);
-}
