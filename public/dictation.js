@@ -12,6 +12,12 @@ let isRecording = false;
 let transcriptParts = [];
 let lastFinalAt = 0;
 let alreadyFinalized = false;
+let recordStartedAt = 0;
+// Safety cap: if the user somehow streams more than this much audio in one
+// session, force the worklet to stop sending. Prevents the "ran whisper on
+// 124 seconds of audio for a 3-second hold" failure mode we saw in testing.
+const MAX_RECORD_BYTES = 24000 * 2 * 30; // 30 s of mono int16 PCM @ 24 kHz
+let bytesStreamed = 0;
 
 function log(line) {
   const ts = new Date().toLocaleTimeString();
@@ -142,6 +148,8 @@ async function startRecording() {
   transcriptParts = [];
   alreadyFinalized = false;
   isRecording = true;
+  recordStartedAt = Date.now();
+  bytesStreamed = 0;
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
   processorNode = new AudioWorkletNode(audioContext, "audio-capture-processor", {
@@ -153,6 +161,16 @@ async function startRecording() {
   processorNode.port.onmessage = (event) => {
     if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
     const { pcm16 } = event.data;
+    if (bytesStreamed + pcm16.byteLength > MAX_RECORD_BYTES) {
+      // Hit the 30s cap. Drop further audio for this session — the user
+      // (or a stuck mic stream) is sending more than we want to feed whisper.
+      if (isRecording) {
+        log("Audio cap reached (" + MAX_RECORD_BYTES + " bytes), stopping mic");
+        isRecording = false;
+      }
+      return;
+    }
+    bytesStreamed += pcm16.byteLength;
     socket.send(
       JSON.stringify({
         type: "input_audio_buffer.append",
@@ -171,8 +189,9 @@ async function startRecording() {
 function stopRecording() {
   if (!isRecording) return;
   isRecording = false;
+  const heldMs = Date.now() - recordStartedAt;
   setStatus("Finalizing…");
-  log("Mic stopped, committing buffer");
+  log("Mic stopped after " + heldMs + "ms, sent " + bytesStreamed + " bytes (" + Math.round(bytesStreamed / 48) + "ms of audio), committing buffer");
 
   try {
     processorNode?.disconnect();

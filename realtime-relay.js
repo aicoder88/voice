@@ -46,12 +46,15 @@ export function attachRealtimeRelay(server, options = {}) {
     instructions = defaultInstructions,
     deepgramApiKey = process.env.DEEPGRAM_API_KEY,
     deepgramModel = process.env.DEEPGRAM_MODEL || "nova-3",
-    whisperBin = process.env.WHISPER_CLI || "whisper-cli",
+    whisperBin = process.env.WHISPER_BIN || process.env.WHISPER_CLI || "whisper-cli",
     whisperModel = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin",
     defaultProvider = process.env.STT_PROVIDER || "openai"
   } = options;
 
-  if (!apiKey) {
+  // Only require the OpenAI key when openai is the actual default provider. The
+  // per-connection check below also rejects ?provider=openai requests when the
+  // key is missing, so deepgram/whisper-local users can run without one.
+  if (defaultProvider === "openai" && !apiKey) {
     throw new Error("Missing OPENAI_API_KEY. Create a .env file from .env.example first.");
   }
 
@@ -84,6 +87,11 @@ export function attachRealtimeRelay(server, options = {}) {
       return;
     }
 
+    if (!apiKey) {
+      sendToClient(clientSocket, { type: "local.error", message: "Missing OPENAI_API_KEY in .env" });
+      clientSocket.close();
+      return;
+    }
     attachOpenAI(clientSocket, requestUrl, { apiKey, model, instructions });
   });
 

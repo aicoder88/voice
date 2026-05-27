@@ -13,6 +13,8 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
+import { captureForegroundWindow, restoreForegroundWindow } from "./src/foreground.js";
+import { appendFileSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
@@ -34,6 +36,43 @@ let hotkeyEngine = null;
 let isQuitting = false;
 const dictation = new DictationSession();
 
+const DEBUG_LOG = join(__dirname, "debug.log");
+function dlog(/** @type {string} */ tag, /** @type {unknown} */ data) {
+  try {
+    const line = `[${new Date().toISOString()}] ${tag} ${typeof data === "string" ? data : JSON.stringify(data)}\n`;
+    appendFileSync(DEBUG_LOG, line);
+  } catch {}
+}
+
+/** @type {number | null} */
+let savedForegroundHwnd = null;
+
+// Whisper "non-speech" tokens that the model emits for music, applause,
+// keyboard noise, silence, etc. These are model artifacts, not speech the
+// user wants pasted. Strip them before the cleanup pass.
+const NOISE_TOKEN_PATTERNS = [
+  /\[\s*music[^\]]*\]/gi,
+  /\[\s*applause[^\]]*\]/gi,
+  /\[\s*laughter[^\]]*\]/gi,
+  /\[\s*silence[^\]]*\]/gi,
+  /\[\s*sounds?\s+of[^\]]*\]/gi,
+  /\[\s*background\s+noise[^\]]*\]/gi,
+  /\(\s*music[^)]*\)/gi,
+  /\(\s*applause[^)]*\)/gi,
+  /\(\s*laughter[^)]*\)/gi,
+  /\(\s*keyboard[^)]*\)/gi,
+  /\(\s*clicking[^)]*\)/gi,
+  /\(\s*typing[^)]*\)/gi,
+  /\(\s*coughing[^)]*\)/gi,
+  /\(\s*breathing[^)]*\)/gi
+];
+
+function stripWhisperNoiseTokens(/** @type {string} */ text) {
+  let out = text;
+  for (const re of NOISE_TOKEN_PATTERNS) out = out.replace(re, "");
+  return out.replace(/\s+/g, " ").trim();
+}
+
 const TRAY_PNG_BASE64 =
   "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOUlEQVR42mNk+M9AGWAcNWBYGsCITwOyOAsmZ2NjI4SmaBgFRMxQB0YBh4ABjPgsoEoYUMUFVAlFAGZNCY+vXVwLAAAAAElFTkSuQmCC";
 
@@ -47,7 +86,11 @@ function makeTrayIcon() {
 }
 
 async function bootRelayServer() {
-  if (!process.env.OPENAI_API_KEY) {
+  // The relay only needs OPENAI_API_KEY when the dictation window will
+  // actually open an OpenAI WebSocket. whisper-local and deepgram providers
+  // talk to their own backends, so don't gate boot on the OpenAI key.
+  const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+  if (provider === "openai" && !process.env.OPENAI_API_KEY) {
     serverError = `Missing OPENAI_API_KEY in ${envPath}`;
     return null;
   }
@@ -159,19 +202,45 @@ function hidePill() {
 async function setupHotkey() {
   if (!serverPort || !dictationWindow) return;
   try {
+    const { isAltKeyDown } = await import("./src/foreground.js");
+
+    /** @type {ReturnType<typeof setInterval> | null} */
+    let altPollTimer = null;
+
+    const fireRelease = (/** @type {string} */ source) => {
+      if (!dictation.release()) return;
+      dlog("release", { source });
+      console.error("[main] dictation:stop (" + source + ")");
+      dictationWindow.webContents.send("dictation:stop");
+      hidePill();
+      if (altPollTimer) { clearInterval(altPollTimer); altPollTimer = null; }
+    };
+
     const mod = await import("./src/hotkey.js");
     hotkeyEngine = mod.startHotkey({
       onPress: () => {
         if (!dictation.tryStart()) return;
-        console.error("[main] dictation:start");
+        savedForegroundHwnd = captureForegroundWindow();
+        dlog("press", { hwnd: savedForegroundHwnd });
+        console.error("[main] dictation:start (hwnd=" + savedForegroundHwnd + ")");
         showPillNearCursor();
         dictationWindow.webContents.send("dictation:start");
+        // Safety net for uiohook-napi missing the keyup event (Issue 1).
+        // Poll the physical Alt key every 80 ms; if it goes up and we
+        // haven't seen onRelease yet, fire one manually.
+        if (altPollTimer) clearInterval(altPollTimer);
+        altPollTimer = setInterval(() => {
+          if (!dictation.busy) {
+            if (altPollTimer) { clearInterval(altPollTimer); altPollTimer = null; }
+            return;
+          }
+          if (!isAltKeyDown()) {
+            fireRelease("poll-fallback");
+          }
+        }, 80);
       },
       onRelease: () => {
-        if (!dictation.release()) return;
-        console.error("[main] dictation:stop");
-        dictationWindow.webContents.send("dictation:stop");
-        hidePill();
+        fireRelease("uiohook");
       }
     });
     const keyLabel = process.platform === "darwin" ? "right Option (⌥)" : "right Alt";
@@ -187,13 +256,22 @@ function setupIpc() {
     const { releaseAt, sinceRelease } = dictation.finalize();
     console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(transcript));
     hidePill();
-    // NOTE: matches historical behavior — on an empty transcript we return
-    // without calling dictation.done(), so `busy` stays true. The session is
-    // unstuck only by the next successful press cycle. Pre-existing quirk;
-    // worth fixing in a follow-up but out of scope for this refactor.
-    if (!transcript || !transcript.trim()) return;
+    // Empty transcript = misfire (too-short hold). Release the session
+    // immediately so the next press isn't blocked for the safety-timer
+    // window — previously this returned without calling done() and the user
+    // had to wait out the timeout.
+    if (!transcript || !transcript.trim()) {
+      dictation.done();
+      return;
+    }
 
-    let textToType = transcript.trim();
+    let textToType = stripWhisperNoiseTokens(transcript.trim());
+    if (!textToType) {
+      dlog("noise-only", { original: transcript });
+      console.error("[main] transcript was noise-only, dropping");
+      dictation.done();
+      return;
+    }
 
     const cleanupEnabled = process.env.CLEANUP_ENABLED !== "false";
     const commaCount = (textToType.match(/,/g) || []).length;
@@ -224,9 +302,15 @@ function setupIpc() {
     try {
       const tType = Date.now();
       const { typeText } = await import("./src/typing.js");
+      // Restore focus to whichever app the user was typing in when they
+      // hit the hotkey, so Ctrl+V lands there instead of whatever Electron
+      // window may have grabbed focus during the IPC round-trip.
+      const restored = restoreForegroundWindow(savedForegroundHwnd);
+      dlog("paste", { hwnd: savedForegroundHwnd, restored });
+      savedForegroundHwnd = null;
       await typeText(textToType);
       const totalSinceRelease = Date.now() - releaseAt;
-      console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, " + totalSinceRelease + "ms total since release)");
+      console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, " + totalSinceRelease + "ms total since release, restored=" + restored + ")");
     } catch (error) {
       console.error("[main] Typing failed:", error.stack || error.message);
     } finally {
@@ -320,6 +404,22 @@ app.whenReady().then(async () => {
     });
   }
   setupIpc();
+
+  // Warm whisper-server at boot so the first dictation doesn't pay the
+  // 3-second model-load cost. Falls back to CLI silently if it can't spawn.
+  const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+  if (provider === "whisper-local" || provider === "local") {
+    try {
+      const { ensureWhisperServer } = await import("./src/providers/whisper-local.js");
+      const bin = process.env.WHISPER_BIN || process.env.WHISPER_CLI || "whisper-cli";
+      await ensureWhisperServer(bin);
+      dlog("whisper", "warmed at boot");
+      console.error("[main] whisper-server warmed at boot");
+    } catch (err) {
+      dlog("whisper", "warm failed: " + (err && err.message));
+      console.error("[main] whisper warm failed:", err && err.message);
+    }
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
