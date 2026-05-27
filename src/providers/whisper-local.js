@@ -23,69 +23,62 @@ const SAMPLE_RATE = 24000;
 // return an empty string immediately.
 const MIN_PCM_BYTES = 4800; // 0.1s @ 24 kHz mono int16
 
-// Whisper's initial-prompt accepts ~224 tokens (~1000 chars of typical English).
-// Anything longer gets silently truncated by the model, so cap it here with a
-// console warning rather than blowing the budget on a runaway file.
+// Whisper's initial-prompt accepts ~224 tokens (~1000 chars of typical
+// English). Anything longer gets silently truncated by the model, so we
+// truncate here too and surface it in the load log.
 const MAX_PROMPT_CHARS = 1000;
-// Resolve vocab.txt relative to this source file (= projectRoot/models/vocab.txt)
-// rather than process.cwd(). Cwd varies by launch method (npm start vs Finder
-// double-click vs packaged app), and a relative path would silently miss the
-// file from some launchers while working from others — exactly the kind of
-// "works on my machine" bug that masquerades as "the dictionary isn't helping."
+// Resolve vocab.txt against this source file, not process.cwd() — cwd varies
+// by launch method (npm start vs Finder vs packaged) and would silently miss.
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const VOCAB_FILE = join(__dirname, "..", "..", "models", "vocab.txt");
 
 let promptLogged = false;
 
 /**
- * Initial-prompt text used to bias whisper toward custom vocabulary
- * (product names, jargon, people). Resolution order:
- *   1. WHISPER_PROMPT env var (wins if set, even if empty)
- *   2. models/vocab.txt file contents
- *   3. empty string (no bias)
+ * Initial-prompt text that biases whisper toward custom vocabulary. Resolves
+ * from WHISPER_PROMPT env var or models/vocab.txt, truncates to whisper's
+ * limit, and logs once per process so operators can confirm it loaded.
  *
- * Re-read on every commit so editing vocab.txt takes effect without a restart.
- * Logs once per process so operators can confirm vocab is actually loading.
+ * Re-read on every commit so editing vocab.txt takes effect without restart.
  *
  * @returns {Promise<string>}
  */
 async function loadPrompt() {
-  let prompt = "";
-  let source = "";
-  if (typeof process.env.WHISPER_PROMPT === "string") {
-    prompt = truncatePrompt(process.env.WHISPER_PROMPT.trim());
-    source = "env WHISPER_PROMPT";
-  } else {
-    try {
-      const raw = await readFile(VOCAB_FILE, "utf8");
-      // Strip lines that start with '#' so vocab.txt can carry comments.
-      const cleaned = raw
-        .split("\n")
-        .filter((line) => !line.trim().startsWith("#"))
-        .join(" ")
-        .replace(/\s+/g, " ")
-        .trim();
-      prompt = truncatePrompt(cleaned);
-      source = VOCAB_FILE;
-    } catch {
-      source = "(none — no env var, no vocab.txt)";
-    }
-  }
+  const { raw, source } = await resolvePrompt();
+  const truncated = raw.length > MAX_PROMPT_CHARS;
+  const prompt = truncated ? raw.slice(0, MAX_PROMPT_CHARS) : raw;
   if (!promptLogged) {
     promptLogged = true;
-    console.error("[whisper-local] vocab prompt: " + prompt.length + " chars from " + source);
+    const note = truncated ? " (truncated from " + raw.length + ")" : "";
+    console.error("[whisper-local] vocab prompt: " + prompt.length + " chars from " + source + note);
   }
   return prompt;
 }
 
 /**
- * @param {string} text
- * @returns {string}
+ * Where the prompt text comes from. Env var wins (even if empty), then
+ * vocab.txt, then nothing.
+ *
+ * @returns {Promise<{ raw: string, source: string }>}
  */
-function truncatePrompt(text) {
-  if (text.length <= MAX_PROMPT_CHARS) return text;
-  console.error("[whisper-local] prompt truncated from " + text.length + " to " + MAX_PROMPT_CHARS + " chars");
-  return text.slice(0, MAX_PROMPT_CHARS);
+async function resolvePrompt() {
+  if (typeof process.env.WHISPER_PROMPT === "string") {
+    return { raw: process.env.WHISPER_PROMPT.trim(), source: "env WHISPER_PROMPT" };
+  }
+  try {
+    const text = await readFile(VOCAB_FILE, "utf8");
+    // Lines starting with '#' are comments; everything else collapses to one
+    // whitespace-normalized blob that becomes whisper's initial prompt.
+    const raw = text
+      .split("\n")
+      .filter((line) => !line.trim().startsWith("#"))
+      .join(" ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return { raw, source: VOCAB_FILE };
+  } catch {
+    return { raw: "", source: "(none)" };
+  }
 }
 
 /** @type {import("node:child_process").ChildProcess | null} */
