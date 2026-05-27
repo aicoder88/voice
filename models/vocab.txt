@@ -1,0 +1,27 @@
+# Custom dictionary for whisper-local dictation.
+#
+# This file is loaded as whisper's "initial prompt" — text that biases the
+# model toward your vocabulary. Whisper isn't learning these words; it's
+# being told "these words tend to appear in this speaker's audio," which
+# improves recognition of brand names, jargon, and people.
+#
+# RULES that matter:
+#   - Lines starting with # are comments and ignored.
+#   - Everything else gets concatenated into one ~150-word prompt.
+#   - Reloaded on every transcription — no restart needed.
+#   - Set WHISPER_PROMPT="" to disable without deleting this file.
+#
+# WHAT TO PUT IN (and what to keep out):
+#   - YES: rare, distinctive proper nouns whisper mangles (Purrify, Estefania).
+#   - NO:  common English words or homophones of them. Adding "Claude" caused
+#          "caught" to be misheard as "Claude". Adding "Stripe" can cause
+#          "stripped" to be misheard as "Stripe". Adding "Mark" can capitalize
+#          the verb. When in doubt, leave it out — whisper already knows
+#          common words.
+#
+# To add a word: write it inside a natural sentence below, ideally next to
+# words that clarify what it means. Context > lists.
+
+Purrify is a cat-care brand. Ulix Travel is a travel company.
+The team includes Nia, Estefania, and Drago.
+Common platforms: Supabase, Cloudflare, Netlify, Anthropic, OpenAI.

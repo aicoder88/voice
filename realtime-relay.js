@@ -47,7 +47,7 @@ export function attachRealtimeRelay(server, options = {}) {
     deepgramApiKey = process.env.DEEPGRAM_API_KEY,
     deepgramModel = process.env.DEEPGRAM_MODEL || "nova-3",
     whisperBin = process.env.WHISPER_CLI || "whisper-cli",
-    whisperModel = process.env.WHISPER_MODEL || "./models/ggml-base.en.bin",
+    whisperModel = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin",
     defaultProvider = process.env.STT_PROVIDER || "openai"
   } = options;
 

@@ -11,9 +11,10 @@
 // or the parity harness).
 
 import { spawn } from "node:child_process";
-import { writeFile, unlink, mkdtemp } from "node:fs/promises";
+import { writeFile, unlink, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { sendToClient } from "./_shared.js";
 
 const SAMPLE_RATE = 24000;
@@ -21,6 +22,71 @@ const SAMPLE_RATE = 24000;
 // the hotkey rather than holding it). Skip the transcription round-trip and
 // return an empty string immediately.
 const MIN_PCM_BYTES = 4800; // 0.1s @ 24 kHz mono int16
+
+// Whisper's initial-prompt accepts ~224 tokens (~1000 chars of typical English).
+// Anything longer gets silently truncated by the model, so cap it here with a
+// console warning rather than blowing the budget on a runaway file.
+const MAX_PROMPT_CHARS = 1000;
+// Resolve vocab.txt relative to this source file (= projectRoot/models/vocab.txt)
+// rather than process.cwd(). Cwd varies by launch method (npm start vs Finder
+// double-click vs packaged app), and a relative path would silently miss the
+// file from some launchers while working from others — exactly the kind of
+// "works on my machine" bug that masquerades as "the dictionary isn't helping."
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const VOCAB_FILE = join(__dirname, "..", "..", "models", "vocab.txt");
+
+let promptLogged = false;
+
+/**
+ * Initial-prompt text used to bias whisper toward custom vocabulary
+ * (product names, jargon, people). Resolution order:
+ *   1. WHISPER_PROMPT env var (wins if set, even if empty)
+ *   2. models/vocab.txt file contents
+ *   3. empty string (no bias)
+ *
+ * Re-read on every commit so editing vocab.txt takes effect without a restart.
+ * Logs once per process so operators can confirm vocab is actually loading.
+ *
+ * @returns {Promise<string>}
+ */
+async function loadPrompt() {
+  let prompt = "";
+  let source = "";
+  if (typeof process.env.WHISPER_PROMPT === "string") {
+    prompt = truncatePrompt(process.env.WHISPER_PROMPT.trim());
+    source = "env WHISPER_PROMPT";
+  } else {
+    try {
+      const raw = await readFile(VOCAB_FILE, "utf8");
+      // Strip lines that start with '#' so vocab.txt can carry comments.
+      const cleaned = raw
+        .split("\n")
+        .filter((line) => !line.trim().startsWith("#"))
+        .join(" ")
+        .replace(/\s+/g, " ")
+        .trim();
+      prompt = truncatePrompt(cleaned);
+      source = VOCAB_FILE;
+    } catch {
+      source = "(none — no env var, no vocab.txt)";
+    }
+  }
+  if (!promptLogged) {
+    promptLogged = true;
+    console.error("[whisper-local] vocab prompt: " + prompt.length + " chars from " + source);
+  }
+  return prompt;
+}
+
+/**
+ * @param {string} text
+ * @returns {string}
+ */
+function truncatePrompt(text) {
+  if (text.length <= MAX_PROMPT_CHARS) return text;
+  console.error("[whisper-local] prompt truncated from " + text.length + " to " + MAX_PROMPT_CHARS + " chars");
+  return text.slice(0, MAX_PROMPT_CHARS);
+}
 
 /** @type {import("node:child_process").ChildProcess | null} */
 let whisperServerProc = null;
@@ -40,7 +106,7 @@ function ensureWhisperServer(bin) {
   if (whisperServerReady) return whisperServerReady;
 
   const serverBin = bin ? bin.replace(/-cli$/, "-server") : "whisper-server";
-  const model = process.env.WHISPER_MODEL || "./models/ggml-base.en.bin";
+  const model = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin";
   const port = process.env.WHISPER_PORT || "8081";
   const baseUrl = `http://127.0.0.1:${port}`;
 
@@ -161,7 +227,8 @@ export async function attach(clientSocket, { bin, model }) {
         return;
       }
       try {
-        const transcript = await transcribePcm(pcm, SAMPLE_RATE, bin, model);
+        const prompt = await loadPrompt();
+        const transcript = await transcribePcm(pcm, SAMPLE_RATE, bin, model, prompt);
         sendToClient(clientSocket, {
           type: "conversation.item.input_audio_transcription.completed",
           transcript
@@ -184,15 +251,16 @@ export async function attach(clientSocket, { bin, model }) {
  * @param {number} sampleRate
  * @param {string} bin
  * @param {string} model
+ * @param {string} prompt
  * @returns {Promise<string>}
  */
-async function transcribePcm(pcmBuffer, sampleRate, bin, model) {
+async function transcribePcm(pcmBuffer, sampleRate, bin, model, prompt) {
   const wav = wrapWav(pcmBuffer, sampleRate);
   const serverUrl = process.env.WHISPER_SERVER_URL;
   const t0 = Date.now();
   if (serverUrl) {
     try {
-      const text = await runWhisperServer(serverUrl, wav);
+      const text = await runWhisperServer(serverUrl, wav, prompt);
       console.error("[relay] whisper-local (server) " + (Date.now() - t0) + "ms: " + JSON.stringify(text));
       return text;
     } catch (err) {
@@ -203,7 +271,7 @@ async function transcribePcm(pcmBuffer, sampleRate, bin, model) {
   const wavPath = join(dir, "input.wav");
   await writeFile(wavPath, wav);
   try {
-    const text = await runWhisper(bin, model, wavPath);
+    const text = await runWhisper(bin, model, wavPath, prompt);
     console.error("[relay] whisper-local (cli) " + (Date.now() - t0) + "ms: " + JSON.stringify(text));
     return text;
   } finally {
@@ -214,9 +282,10 @@ async function transcribePcm(pcmBuffer, sampleRate, bin, model) {
 /**
  * @param {string} url
  * @param {Buffer} wavBuffer
+ * @param {string} prompt
  * @returns {Promise<string>}
  */
-async function runWhisperServer(url, wavBuffer) {
+async function runWhisperServer(url, wavBuffer, prompt) {
   const form = new FormData();
   // Node Buffer is structurally a BlobPart, but TS's lib narrows the buffer's
   // underlying type to ArrayBuffer (rejecting SharedArrayBuffer-backed views).
@@ -224,6 +293,7 @@ async function runWhisperServer(url, wavBuffer) {
   form.append("file", new Blob([/** @type {ArrayBuffer} */ (wavBuffer.buffer)], { type: "audio/wav" }), "audio.wav");
   form.append("response_format", "json");
   form.append("temperature", "0.0");
+  if (prompt) form.append("prompt", prompt);
   const res = await fetch(url, { method: "POST", body: form });
   if (!res.ok) {
     const body = await res.text().catch(() => "");
@@ -268,9 +338,10 @@ function wrapWav(pcm, sampleRate) {
  * @param {string} bin
  * @param {string} model
  * @param {string} wavPath
+ * @param {string} prompt
  * @returns {Promise<string>}
  */
-function runWhisper(bin, model, wavPath) {
+function runWhisper(bin, model, wavPath, prompt) {
   return new Promise((resolve, reject) => {
     const args = [
       "-m", model,
@@ -281,6 +352,7 @@ function runWhisper(bin, model, wavPath) {
       "--no-fallback",
       "-t", "4"
     ];
+    if (prompt) args.push("--prompt", prompt);
     const proc = spawn(bin, args);
     let stdout = "";
     let stderr = "";

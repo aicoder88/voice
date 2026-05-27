@@ -242,7 +242,7 @@ test("parity: whisper-local completes one utterance", async (t) => {
     t.skip("OPENAI_API_KEY required to boot the relay");
     return;
   }
-  const modelPath = process.env.WHISPER_MODEL || "./models/ggml-base.en.bin";
+  const modelPath = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin";
   if (!existsSync(modelPath)) {
     t.skip(`whisper model not found at ${modelPath}`);
     return;

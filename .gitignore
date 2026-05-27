@@ -6,8 +6,11 @@ AGENTS.md
 OPENAI_KEY_AUDIT.md
 npm-debug.log*
 
-# whisper.cpp model weights — fetched per machine, not tracked
-models/
+# whisper.cpp model weights — fetched per machine, not tracked.
+# Use models/* (not models/) so we can negate the rule for vocab.txt below.
+models/*
+# …except vocab.txt: small text config the dictation engine reads at runtime.
+!models/vocab.txt
 
 # parity harness recorded fixtures stay in-tree (see scripts/parity/fixtures/)
 
