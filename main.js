@@ -12,11 +12,9 @@ if (!app.requestSingleInstanceLock()) {
   process.exit(0);
 }
 app.on("second-instance", () => {
-  if (mainWindow) {
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.show();
-    mainWindow.focus();
-  }
+  // Headless app — there's no main window to refocus, just flash the tray
+  // tooltip so the user knows the existing instance acknowledged them.
+  if (tray) tray.displayBalloon?.({ title: "Voice Dictation", content: "Already running. Hold right Alt to dictate." });
 });
 
 process.on("uncaughtException", (err) => {
@@ -30,14 +28,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
-import { captureForegroundWindow, restoreForegroundWindow } from "./src/foreground.js";
+import { captureForegroundWindow, restoreForegroundWindow, getWindowRect } from "./src/foreground.js";
 import { appendFileSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
 
-/** @type {import("electron").BrowserWindow | null} */
-let mainWindow = null;
 /** @type {import("electron").BrowserWindow | null} */
 let pillWindow = null;
 /** @type {import("electron").BrowserWindow | null} */
@@ -118,35 +114,6 @@ async function bootRelayServer() {
   }
 }
 
-function createMainWindow() {
-  mainWindow = new BrowserWindow({
-    width: 920,
-    height: 720,
-    title: "Voice Dictation",
-    backgroundColor: "#101820",
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true
-    }
-  });
-
-  if (serverPort) {
-    mainWindow.loadURL(`http://localhost:${serverPort}/setup.html`);
-  } else {
-    mainWindow.loadFile(join(__dirname, "public", "setup.html"), {
-      query: { error: serverError || "Server not started" }
-    });
-  }
-
-  mainWindow.on("close", (event) => {
-    if (!isQuitting) {
-      event.preventDefault();
-      mainWindow.hide();
-    }
-  });
-}
-
 function createPillWindow() {
   pillWindow = new BrowserWindow({
     width: 180,
@@ -176,6 +143,39 @@ function createPillWindow() {
   }
 }
 
+const PILL_W = 180;
+const PILL_H = 56;
+const PILL_MARGIN = 12;
+
+// Place the pill near the top-right corner of the window the user was typing
+// into when the hotkey fired (so it appears AT the work surface, not wherever
+// the cursor happened to be). Falls back to the top-right of the cursor's
+// display if the foreground window has no usable rectangle (some PWA/UWP
+// windows return zero or off-screen bounds).
+function showPillForWindow(/** @type {number | null} */ hwnd) {
+  if (!pillWindow) return;
+  const rect = hwnd ? getWindowRect(hwnd) : null;
+  let x;
+  let y;
+  if (rect && rect.right > rect.left && rect.bottom > rect.top) {
+    x = rect.right - PILL_W - PILL_MARGIN;
+    y = rect.top + PILL_MARGIN;
+  } else {
+    const cursor = screen.getCursorScreenPoint();
+    const display = screen.getDisplayNearestPoint(cursor);
+    x = display.bounds.x + display.bounds.width - PILL_W - PILL_MARGIN;
+    y = display.bounds.y + PILL_MARGIN;
+  }
+  pillWindow.setBounds({ x, y, width: PILL_W, height: PILL_H });
+  pillWindow.showInactive();
+}
+
+function hidePill() {
+  if (pillWindow && pillWindow.isVisible()) {
+    pillWindow.hide();
+  }
+}
+
 function createDictationWindow() {
   if (!serverPort) return;
   dictationWindow = new BrowserWindow({
@@ -195,22 +195,6 @@ function createDictationWindow() {
   });
   const provider = encodeURIComponent((process.env.STT_PROVIDER || "openai").toLowerCase());
   dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html?provider=${provider}`);
-}
-
-function showPillNearCursor() {
-  if (!pillWindow) return;
-  const cursor = screen.getCursorScreenPoint();
-  const display = screen.getDisplayNearestPoint(cursor);
-  const x = Math.min(cursor.x + 16, display.bounds.x + display.bounds.width - 200);
-  const y = Math.min(cursor.y + 16, display.bounds.y + display.bounds.height - 80);
-  pillWindow.setBounds({ x, y, width: 180, height: 56 });
-  pillWindow.showInactive();
-}
-
-function hidePill() {
-  if (pillWindow && pillWindow.isVisible()) {
-    pillWindow.hide();
-  }
 }
 
 // Languages cycled by the right-Ctrl tap. Stored in process.env so deepgram.js
@@ -262,7 +246,7 @@ async function setupHotkey() {
         savedForegroundHwnd = captureForegroundWindow();
         dlog("press", { profile, hwnd: savedForegroundHwnd });
         console.error("[main] dictation:start lang=" + profile.language + " (hwnd=" + savedForegroundHwnd + ")");
-        showPillNearCursor();
+        showPillForWindow(savedForegroundHwnd);
         dictationWindow.webContents.send("dictation:start", profile);
       },
       onRelease: () => {
@@ -360,15 +344,6 @@ function createTray() {
 
   const menu = Menu.buildFromTemplate([
     {
-      label: "Show Window",
-      click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          mainWindow.focus();
-        }
-      }
-    },
-    {
       label: serverPort ? `Relay: http://localhost:${serverPort}` : "Relay: not running",
       enabled: !!serverPort,
       click: () => serverPort && shell.openExternal(`http://localhost:${serverPort}`)
@@ -384,11 +359,6 @@ function createTray() {
   ]);
 
   tray.setContextMenu(menu);
-  tray.on("click", () => {
-    if (mainWindow) {
-      mainWindow.isVisible() ? mainWindow.hide() : mainWindow.show();
-    }
-  });
 }
 
 function buildAppMenu() {
@@ -421,9 +391,14 @@ function buildAppMenu() {
 }
 
 app.whenReady().then(async () => {
+  // Headless tray app — Electron's "no windows" default behaviour would quit
+  // the process otherwise. The pill/dictation windows come and go; we want
+  // the tray to stay live regardless.
+  if (process.platform === "darwin") {
+    app.dock?.hide();
+  }
   await bootRelayServer();
   buildAppMenu();
-  createMainWindow();
   createTray();
   if (serverPort) {
     createPillWindow();
@@ -450,11 +425,6 @@ app.whenReady().then(async () => {
     }
   }
 
-  app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createMainWindow();
-    }
-  });
 });
 
 app.on("window-all-closed", (event) => {

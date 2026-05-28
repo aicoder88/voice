@@ -16,6 +16,8 @@ let SetForegroundWindow = null;
 let GetForegroundWindow = null;
 /** @type {((vk: number) => number) | null} */
 let GetAsyncKeyState = null;
+/** @type {((hwnd: number, rect: Buffer) => number) | null} */
+let GetWindowRect = null;
 
 if (isWin) {
   try {
@@ -26,6 +28,8 @@ if (isWin) {
     GetForegroundWindow = user32.func("__stdcall", "GetForegroundWindow", "intptr_t", []);
     SetForegroundWindow = user32.func("__stdcall", "SetForegroundWindow", "int", ["intptr_t"]);
     GetAsyncKeyState = user32.func("__stdcall", "GetAsyncKeyState", "short", ["int"]);
+    // RECT is 16 bytes: left, top, right, bottom (all int32).
+    GetWindowRect = user32.func("__stdcall", "GetWindowRect", "int", ["intptr_t", "void *"]);
   } catch (err) {
     console.error("[foreground] koffi load failed:", err && err.message);
   }
@@ -93,4 +97,29 @@ export function isRightAltDown() {
  */
 export function isRightCtrlDown() {
   return asyncKeyDown(VK_RCONTROL);
+}
+
+/**
+ * Return the screen-space rectangle of an HWND (left/top/right/bottom in
+ * physical pixels), or null if the call fails. Used to anchor the listening
+ * pill to the window the user was typing into.
+ * @param {number | null} hwnd
+ * @returns {{ left: number, top: number, right: number, bottom: number } | null}
+ */
+export function getWindowRect(hwnd) {
+  if (!GetWindowRect || !hwnd) return null;
+  try {
+    const buf = Buffer.alloc(16);
+    const ok = GetWindowRect(hwnd, buf);
+    if (!ok) return null;
+    return {
+      left: buf.readInt32LE(0),
+      top: buf.readInt32LE(4),
+      right: buf.readInt32LE(8),
+      bottom: buf.readInt32LE(12)
+    };
+  } catch (err) {
+    console.error("[foreground] GetWindowRect failed:", err && err.message);
+    return null;
+  }
 }
