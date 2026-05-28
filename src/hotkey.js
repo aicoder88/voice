@@ -1,48 +1,25 @@
 // @ts-check
-import { uIOhook, UiohookKey } from "uiohook-napi";
+// Polling-based hotkey detector. Reads physical key state via Win32
+// GetAsyncKeyState (in src/foreground.js) at ~30 Hz and fires callbacks on
+// edges. No global keyboard hook — uiohook-napi's low-level Windows hook
+// could silently die under focus/security/RDP churn and produce a "frozen"
+// app where the pill no longer appears. Polling can't be lost: it asks the
+// kernel for the current bit, every tick.
+//
+//   - Right Alt = hold-to-talk. onPress on the down edge, onRelease on the up.
+//   - Right Ctrl tap (down + up within CTRL_TAP_WINDOW_MS, with no Alt edge
+//     during that span) fires onToggleLanguage. Holding right Ctrl, or
+//     pressing it as part of a chord, does NOT toggle.
+//
+// Latency: poll period + 0 = ~33 ms worst case. Imperceptible for hold-to-
+// talk. CPU: negligible (two GetAsyncKeyState calls per tick).
 
-// uiohook-napi's UiohookKey type exposes AltRight/Alt but not the AltLeft and
-// AltGraph constants some platforms emit. We probe via bracket access (which
-// types as `any`) and filter out the undefineds at runtime.
-/** @type {Record<string, number | undefined>} */
-const keyCodes = UiohookKey;
-const ALT_KEYCODES = new Set(
-  [
-    keyCodes.AltRight,
-    keyCodes.AltLeft,
-    keyCodes.Alt,
-    keyCodes.AltGraph,
-    3640,
-    56
-  ].filter((v) => typeof v === "number")
-);
+import { isRightAltDown, isRightCtrlDown } from "./foreground.js";
 
-// Right-Ctrl only. Left-Ctrl is deliberately excluded — Ctrl+C / Ctrl+V are
-// everywhere and would constantly fire the toggle. On Windows uiohook emits
-// 3613 for the extended right-ctrl scancode; UiohookKey.CtrlR is the named
-// constant in newer versions of uiohook-napi.
-const CTRL_R_KEYCODES = new Set(
-  [
-    keyCodes.CtrlR,
-    keyCodes.ControlRight,
-    3613
-  ].filter((v) => typeof v === "number")
-);
-
-// Right-Ctrl tap window. If the user holds right-Ctrl longer than this, it's
-// not a tap. If they press any OTHER key while right-Ctrl is down (e.g.
-// Right-Ctrl + C if anyone has that bound), it's also not a tap.
-const CTRL_TAP_WINDOW_MS = 350;
+const POLL_INTERVAL_MS = 33;
+const CTRL_TAP_WINDOW_MS = 300;
 
 /**
- * Start listening for the global hotkeys via uiohook-napi.
- *
- *   - Right-Alt = hold-to-talk. Fires onPress on keydown, onRelease on keyup.
- *   - Right-Ctrl tap (press+release within {@link CTRL_TAP_WINDOW_MS}, with no
- *     other keydown in between) fires onToggleLanguage. Holding right-Ctrl,
- *     or pressing it as part of a chord, does NOT fire the toggle — so Ctrl-
- *     based shortcuts on the right hand still work normally.
- *
  * @param {{
  *   onPress?: (key: "alt") => void,
  *   onRelease?: (key: "alt") => void,
@@ -51,56 +28,42 @@ const CTRL_TAP_WINDOW_MS = 350;
  * @returns {{ stop: () => void }}
  */
 export function startHotkey({ onPress, onRelease, onToggleLanguage }) {
-  let altHeld = false;
+  let altWas = false;
+  let ctrlWas = false;
   /** @type {number | null} */
   let ctrlDownAt = null;
-  let ctrlSawOtherKey = false;
+  let ctrlChorded = false;
 
-  const handleDown = (event) => {
-    const code = event.keycode;
-    if (ALT_KEYCODES.has(code)) {
-      // Alt counts as "another key" if Ctrl's tap window is open.
-      if (ctrlDownAt !== null) ctrlSawOtherKey = true;
-      if (altHeld) return;
-      altHeld = true;
-      console.error("[hotkey] PRESS alt (keycode=" + code + ")");
+  const tick = () => {
+    const altNow = isRightAltDown();
+    const ctrlNow = isRightCtrlDown();
+
+    if (altNow && !altWas) {
+      if (ctrlDownAt !== null) ctrlChorded = true;
+      console.error("[hotkey] PRESS alt");
       try {
         onPress?.("alt");
       } catch (error) {
         console.error("hotkey onPress error:", error);
       }
-      return;
-    }
-    if (CTRL_R_KEYCODES.has(code)) {
-      if (ctrlDownAt !== null) return; // auto-repeat
-      ctrlDownAt = Date.now();
-      ctrlSawOtherKey = false;
-      return;
-    }
-    // Any other key cancels the in-progress Ctrl tap (so Ctrl-chord shortcuts
-    // are not misread as a language toggle).
-    if (ctrlDownAt !== null) ctrlSawOtherKey = true;
-  };
-
-  const handleUp = (event) => {
-    const code = event.keycode;
-    if (ALT_KEYCODES.has(code)) {
-      if (!altHeld) return;
-      altHeld = false;
-      console.error("[hotkey] RELEASE alt (keycode=" + code + ")");
+    } else if (!altNow && altWas) {
+      console.error("[hotkey] RELEASE alt");
       try {
         onRelease?.("alt");
       } catch (error) {
         console.error("hotkey onRelease error:", error);
       }
-      return;
     }
-    if (CTRL_R_KEYCODES.has(code)) {
-      if (ctrlDownAt === null) return;
+    altWas = altNow;
+
+    if (ctrlNow && !ctrlWas) {
+      ctrlDownAt = Date.now();
+      ctrlChorded = false;
+    } else if (!ctrlNow && ctrlWas && ctrlDownAt !== null) {
       const held = Date.now() - ctrlDownAt;
-      const wasTap = !ctrlSawOtherKey && held <= CTRL_TAP_WINDOW_MS;
+      const wasTap = !ctrlChorded && held <= CTRL_TAP_WINDOW_MS;
       ctrlDownAt = null;
-      ctrlSawOtherKey = false;
+      ctrlChorded = false;
       if (wasTap) {
         console.error("[hotkey] TAP ctrl (held=" + held + "ms)");
         try {
@@ -109,21 +72,15 @@ export function startHotkey({ onPress, onRelease, onToggleLanguage }) {
           console.error("hotkey onToggleLanguage error:", error);
         }
       }
-      return;
     }
+    ctrlWas = ctrlNow;
   };
 
-  uIOhook.on("keydown", handleDown);
-  uIOhook.on("keyup", handleUp);
-  uIOhook.start();
+  const timer = setInterval(tick, POLL_INTERVAL_MS);
 
   return {
     stop() {
-      uIOhook.off("keydown", handleDown);
-      uIOhook.off("keyup", handleUp);
-      try {
-        uIOhook.stop();
-      } catch {}
+      clearInterval(timer);
     }
   };
 }

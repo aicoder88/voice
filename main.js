@@ -246,18 +246,12 @@ function updateTrayTooltip() {
 async function setupHotkey() {
   if (!serverPort || !dictationWindow) return;
   try {
-    const { isAltKeyDown } = await import("./src/foreground.js");
-
-    /** @type {ReturnType<typeof setInterval> | null} */
-    let pollTimer = null;
-
     const fireRelease = (/** @type {string} */ source) => {
       if (!dictation.release()) return;
       dlog("release", { source });
       console.error("[main] dictation:stop (" + source + ")");
       dictationWindow.webContents.send("dictation:stop");
       hidePill();
-      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     };
 
     const mod = await import("./src/hotkey.js");
@@ -270,19 +264,9 @@ async function setupHotkey() {
         console.error("[main] dictation:start lang=" + profile.language + " (hwnd=" + savedForegroundHwnd + ")");
         showPillNearCursor();
         dictationWindow.webContents.send("dictation:start", profile);
-        if (pollTimer) clearInterval(pollTimer);
-        pollTimer = setInterval(() => {
-          if (!dictation.busy) {
-            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-            return;
-          }
-          if (!isAltKeyDown()) {
-            fireRelease("poll-fallback");
-          }
-        }, 80);
       },
       onRelease: () => {
-        fireRelease("uiohook");
+        fireRelease("hotkey");
       },
       onToggleLanguage: () => {
         toggleLanguage();
@@ -293,7 +277,6 @@ async function setupHotkey() {
     console.log(`Global hotkeys active: hold ${altLabel} to dictate, tap right Ctrl to toggle hr/en.`);
   } catch (error) {
     console.error("Failed to start global hotkey:", error.message);
-    console.error("Run: npm install uiohook-napi");
   }
 }
 

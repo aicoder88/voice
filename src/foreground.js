@@ -3,8 +3,8 @@
 //   1. captureForegroundWindow / restoreForegroundWindow — remember which app
 //      was focused when the hotkey was pressed so we can paste back into it,
 //      even if Electron stole focus during the IPC round-trip.
-//   2. isAltKeyDown — async-polled keystate query that lets the hotkey loop
-//      detect a release even if uiohook-napi missed the keyup event.
+//   2. isRightAltDown / isRightCtrlDown — synchronous physical-key state
+//      queries the polling hotkey loop in src/hotkey.js calls at ~30 Hz.
 
 import koffi from "koffi";
 
@@ -64,20 +64,15 @@ export function restoreForegroundWindow(hwndNum) {
   }
 }
 
-// VK_MENU = 0x12 (either Alt). High bit of GetAsyncKeyState return = "is down right now".
-const VK_MENU = 0x12;
+// VK_RMENU = 0xA5 (right Alt only — VK_MENU 0x12 would match either Alt).
+const VK_RMENU = 0xA5;
 // VK_RCONTROL = 0xA3 (right Ctrl only — VK_CONTROL 0x11 would match both).
 const VK_RCONTROL = 0xA3;
 
-/**
- * True iff either Alt key is physically held down right now. Used as a
- * uiohook-keyup-missed safety net.
- * @returns {boolean}
- */
-export function isAltKeyDown() {
+function asyncKeyDown(/** @type {number} */ vk) {
   if (!GetAsyncKeyState) return false;
   try {
-    const state = GetAsyncKeyState(VK_MENU);
+    const state = GetAsyncKeyState(vk);
     return (state & 0x8000) !== 0;
   } catch {
     return false;
@@ -85,15 +80,17 @@ export function isAltKeyDown() {
 }
 
 /**
+ * True iff the right Alt key is physically held down right now.
+ * @returns {boolean}
+ */
+export function isRightAltDown() {
+  return asyncKeyDown(VK_RMENU);
+}
+
+/**
  * True iff the right Ctrl key is physically held down right now.
  * @returns {boolean}
  */
 export function isRightCtrlDown() {
-  if (!GetAsyncKeyState) return false;
-  try {
-    const state = GetAsyncKeyState(VK_RCONTROL);
-    return (state & 0x8000) !== 0;
-  } catch {
-    return false;
-  }
+  return asyncKeyDown(VK_RCONTROL);
 }
