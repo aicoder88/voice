@@ -2,6 +2,23 @@
 import "dotenv/config";
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen } from "electron";
 
+// Single-instance lock. Without this every `npm start` would spawn an extra
+// Electron process whose global Alt hotkey listener competed with the
+// existing one — pressing right-Alt once fired N parallel dictation sessions
+// and Deepgram WebSockets stepped on each other. Second launches just bring
+// the existing window to the front and exit.
+if (!app.requestSingleInstanceLock()) {
+  app.quit();
+  process.exit(0);
+}
+app.on("second-instance", () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  }
+});
+
 process.on("uncaughtException", (err) => {
   console.error("[uncaughtException]", err && err.stack ? err.stack : err);
 });
