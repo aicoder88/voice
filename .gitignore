@@ -12,6 +12,8 @@ boot.out.log
 boot.err.log
 app.log
 app.err.log
+stdout.log
+stderr.log
 
 # whisper.cpp Windows binaries — platform-specific, fetched by setup script.
 bin/

@@ -66,6 +66,8 @@ export function restoreForegroundWindow(hwndNum) {
 
 // VK_MENU = 0x12 (either Alt). High bit of GetAsyncKeyState return = "is down right now".
 const VK_MENU = 0x12;
+// VK_RCONTROL = 0xA3 (right Ctrl only — VK_CONTROL 0x11 would match both).
+const VK_RCONTROL = 0xA3;
 
 /**
  * True iff either Alt key is physically held down right now. Used as a
@@ -76,6 +78,20 @@ export function isAltKeyDown() {
   if (!GetAsyncKeyState) return false;
   try {
     const state = GetAsyncKeyState(VK_MENU);
+    return (state & 0x8000) !== 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True iff the right Ctrl key is physically held down right now.
+ * @returns {boolean}
+ */
+export function isRightCtrlDown() {
+  if (!GetAsyncKeyState) return false;
+  try {
+    const state = GetAsyncKeyState(VK_RCONTROL);
     return (state & 0x8000) !== 0;
   } catch {
     return false;

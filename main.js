@@ -73,13 +73,10 @@ function stripWhisperNoiseTokens(/** @type {string} */ text) {
   return out.replace(/\s+/g, " ").trim();
 }
 
-const TRAY_PNG_BASE64 =
-  "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAOUlEQVR42mNk+M9AGWAcNWBYGsCITwOyOAsmZ2NjI4SmaBgFRMxQB0YBh4ABjPgsoEoYUMUFVAlFAGZNCY+vXVwLAAAAAElFTkSuQmCC";
-
-function makeTrayIcon() {
+function makeTrayIcon(/** @type {string} */ language) {
   try {
-    const buf = Buffer.from(TRAY_PNG_BASE64, "base64");
-    const img = nativeImage.createFromBuffer(buf);
+    const file = language === "en" ? "tray-en.png" : "tray-hr.png";
+    const img = nativeImage.createFromPath(join(__dirname, "public", file));
     if (!img.isEmpty()) return img;
   } catch {}
   return nativeImage.createEmpty();
@@ -199,13 +196,43 @@ function hidePill() {
   }
 }
 
+// Languages cycled by the right-Ctrl tap. Stored in process.env so deepgram.js
+// can read the latest value on every new connection without an IPC round-trip.
+const DICTATION_LANGUAGES = ["hr", "en"];
+
+function getCurrentLanguage() {
+  return (process.env.WHISPER_LANGUAGE || DICTATION_LANGUAGES[0]).toLowerCase();
+}
+
+function toggleLanguage() {
+  const current = getCurrentLanguage();
+  const idx = DICTATION_LANGUAGES.indexOf(current);
+  const next = DICTATION_LANGUAGES[(idx + 1) % DICTATION_LANGUAGES.length];
+  process.env.WHISPER_LANGUAGE = next;
+  console.error("[main] language toggled " + current + " -> " + next);
+  updateTrayTooltip();
+  return next;
+}
+
+function updateTrayTooltip() {
+  if (!tray) return;
+  const lang = getCurrentLanguage();
+  const keyLabel = process.platform === "darwin" ? "right Option" : "right Alt";
+  tray.setToolTip(
+    `Language: ${lang.toUpperCase()}\n` +
+    `Hold ${keyLabel} to dictate.\n` +
+    `Tap right Ctrl to toggle hr / en.`
+  );
+  try { tray.setImage(makeTrayIcon(lang)); } catch {}
+}
+
 async function setupHotkey() {
   if (!serverPort || !dictationWindow) return;
   try {
     const { isAltKeyDown } = await import("./src/foreground.js");
 
     /** @type {ReturnType<typeof setInterval> | null} */
-    let altPollTimer = null;
+    let pollTimer = null;
 
     const fireRelease = (/** @type {string} */ source) => {
       if (!dictation.release()) return;
@@ -213,25 +240,23 @@ async function setupHotkey() {
       console.error("[main] dictation:stop (" + source + ")");
       dictationWindow.webContents.send("dictation:stop");
       hidePill();
-      if (altPollTimer) { clearInterval(altPollTimer); altPollTimer = null; }
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
     };
 
     const mod = await import("./src/hotkey.js");
     hotkeyEngine = mod.startHotkey({
       onPress: () => {
         if (!dictation.tryStart()) return;
+        const profile = { language: getCurrentLanguage(), model: process.env.DEEPGRAM_MODEL || "nova-3" };
         savedForegroundHwnd = captureForegroundWindow();
-        dlog("press", { hwnd: savedForegroundHwnd });
-        console.error("[main] dictation:start (hwnd=" + savedForegroundHwnd + ")");
+        dlog("press", { profile, hwnd: savedForegroundHwnd });
+        console.error("[main] dictation:start lang=" + profile.language + " (hwnd=" + savedForegroundHwnd + ")");
         showPillNearCursor();
-        dictationWindow.webContents.send("dictation:start");
-        // Safety net for uiohook-napi missing the keyup event (Issue 1).
-        // Poll the physical Alt key every 80 ms; if it goes up and we
-        // haven't seen onRelease yet, fire one manually.
-        if (altPollTimer) clearInterval(altPollTimer);
-        altPollTimer = setInterval(() => {
+        dictationWindow.webContents.send("dictation:start", profile);
+        if (pollTimer) clearInterval(pollTimer);
+        pollTimer = setInterval(() => {
           if (!dictation.busy) {
-            if (altPollTimer) { clearInterval(altPollTimer); altPollTimer = null; }
+            if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
             return;
           }
           if (!isAltKeyDown()) {
@@ -241,10 +266,14 @@ async function setupHotkey() {
       },
       onRelease: () => {
         fireRelease("uiohook");
+      },
+      onToggleLanguage: () => {
+        toggleLanguage();
       }
     });
-    const keyLabel = process.platform === "darwin" ? "right Option (⌥)" : "right Alt";
-    console.log(`Global ${keyLabel} hotkey active (hold to dictate).`);
+    updateTrayTooltip();
+    const altLabel = process.platform === "darwin" ? "right Option (⌥)" : "right Alt";
+    console.log(`Global hotkeys active: hold ${altLabel} to dictate, tap right Ctrl to toggle hr/en.`);
   } catch (error) {
     console.error("Failed to start global hotkey:", error.message);
     console.error("Run: npm install uiohook-napi");
@@ -326,8 +355,8 @@ function setupIpc() {
 }
 
 function createTray() {
-  tray = new Tray(makeTrayIcon());
-  tray.setToolTip("Voice Dictation - hold right-Alt to dictate");
+  tray = new Tray(makeTrayIcon(getCurrentLanguage()));
+  updateTrayTooltip();
 
   const menu = Menu.buildFromTemplate([
     {

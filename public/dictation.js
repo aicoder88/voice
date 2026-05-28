@@ -13,6 +13,9 @@ let transcriptParts = [];
 let lastFinalAt = 0;
 let alreadyFinalized = false;
 let recordStartedAt = 0;
+// Profile passed from main on each press: { language, model } for deepgram.
+// null = fall back to the URL-default behavior used before two-key support.
+let activeProfile = null;
 // Safety cap: if the user somehow streams more than this much audio in one
 // session, force the worklet to stop sending. Prevents the "ran whisper on
 // 124 seconds of audio for a 3-second hold" failure mode we saw in testing.
@@ -41,12 +44,17 @@ async function ensureSocket() {
     // model. The relay reads ?model=, switches the upstream session into
     // STT-only shape, and sends its own session.update on open — we do not
     // need to send one from here. See docs/RELAY_PROTOCOL.md.
-    const url =
-      provider === "deepgram"
-        ? `ws://${window.location.host}/realtime?provider=deepgram`
-        : provider === "whisper-local" || provider === "local"
-          ? `ws://${window.location.host}/realtime?provider=whisper-local`
-          : `ws://${window.location.host}/realtime?model=gpt-realtime-whisper`;
+    let url;
+    if (provider === "deepgram") {
+      const params = new URLSearchParams({ provider: "deepgram" });
+      if (activeProfile?.language) params.set("language", activeProfile.language);
+      if (activeProfile?.model) params.set("model", activeProfile.model);
+      url = `ws://${window.location.host}/realtime?${params.toString()}`;
+    } else if (provider === "whisper-local" || provider === "local") {
+      url = `ws://${window.location.host}/realtime?provider=whisper-local`;
+    } else {
+      url = `ws://${window.location.host}/realtime?model=gpt-realtime-whisper`;
+    }
     const thisSocket = new WebSocket(url);
     socket = thisSocket;
     thisSocket.addEventListener("open", () => {
@@ -117,8 +125,12 @@ function finalizeAndSend(text) {
   transcriptParts = [];
 }
 
-async function startRecording() {
+async function startRecording(profile) {
   if (isRecording) return;
+  activeProfile = profile || null;
+  if (activeProfile) {
+    log("Profile: lang=" + (activeProfile.language || "default") + " model=" + (activeProfile.model || "default"));
+  }
   setStatus("Connecting…");
   try {
     await ensureSocket();
@@ -222,7 +234,7 @@ function stopRecording() {
   }, FALLBACK_MS);
 }
 
-window.dictationBridge.onStart(() => startRecording());
+window.dictationBridge.onStart((profile) => startRecording(profile));
 window.dictationBridge.onStop(() => stopRecording());
 
 function arrayBufferToBase64(buffer) {

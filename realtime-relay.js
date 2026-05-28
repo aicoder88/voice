@@ -24,7 +24,8 @@ const defaultInstructions =
  * @property {string} [path]              WebSocket path (default "/realtime").
  * @property {string} [instructions]      System instructions for conversational mode.
  * @property {string} [deepgramApiKey]    Deepgram API key. Defaults to DEEPGRAM_API_KEY env.
- * @property {string} [deepgramModel]    Deepgram model id (default "nova-3").
+ * @property {string} [deepgramModel]    Deepgram model id (default "nova-2").
+ * @property {string} [deepgramLanguage] Deepgram BCP-47 language code (default "hr").
  * @property {string} [whisperBin]        Path to whisper-cli binary (default "whisper-cli").
  * @property {string} [whisperModel]      Path to whisper.cpp model file.
  * @property {string} [defaultProvider]   STT provider when ?provider= is absent ("openai" | "deepgram" | "whisper-local").
@@ -46,6 +47,10 @@ export function attachRealtimeRelay(server, options = {}) {
     instructions = defaultInstructions,
     deepgramApiKey = process.env.DEEPGRAM_API_KEY,
     deepgramModel = process.env.DEEPGRAM_MODEL || "nova-3",
+    // null = let deepgram.js read process.env.WHISPER_LANGUAGE fresh on each
+    // connection. That way a runtime toggle in main.js takes effect on the
+    // next press without a relay restart.
+    deepgramLanguage = null,
     whisperBin = process.env.WHISPER_BIN || process.env.WHISPER_CLI || "whisper-cli",
     whisperModel = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin",
     defaultProvider = process.env.STT_PROVIDER || "openai"
@@ -78,7 +83,13 @@ export function attachRealtimeRelay(server, options = {}) {
         clientSocket.close();
         return;
       }
-      attachDeepgram(clientSocket, { apiKey: deepgramApiKey, model: deepgramModel });
+      const langOverride = requestUrl.searchParams.get("language");
+      const modelOverride = requestUrl.searchParams.get("model");
+      attachDeepgram(clientSocket, {
+        apiKey: deepgramApiKey,
+        model: modelOverride || deepgramModel,
+        language: langOverride || deepgramLanguage
+      });
       return;
     }
 
