@@ -29,7 +29,7 @@ import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
 import { captureForegroundWindow, restoreForegroundWindow, getWindowRect } from "./src/foreground.js";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, statSync, renameSync, unlinkSync, existsSync } from "node:fs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
@@ -50,10 +50,27 @@ let isQuitting = false;
 const dictation = new DictationSession();
 
 const DEBUG_LOG = join(__dirname, "debug.log");
+const DEBUG_LOG_ROTATED = join(__dirname, "debug.log.1");
+const DEBUG_LOG_MAX_BYTES = 1024 * 1024; // ~1 MB
+/** @type {number} bytes appended to debug.log since boot; seeded from disk on first write */
+let dlogBytesWritten = -1;
 function dlog(/** @type {string} */ tag, /** @type {unknown} */ data) {
   try {
     const line = `[${new Date().toISOString()}] ${tag} ${typeof data === "string" ? data : JSON.stringify(data)}\n`;
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    // Seed the byte counter once with the file's current size so we account
+    // for content carried over from previous runs.
+    if (dlogBytesWritten < 0) {
+      try { dlogBytesWritten = statSync(DEBUG_LOG).size; }
+      catch { dlogBytesWritten = 0; }
+    }
+    if (dlogBytesWritten + lineBytes > DEBUG_LOG_MAX_BYTES) {
+      try { if (existsSync(DEBUG_LOG_ROTATED)) unlinkSync(DEBUG_LOG_ROTATED); } catch {}
+      try { renameSync(DEBUG_LOG, DEBUG_LOG_ROTATED); } catch {}
+      dlogBytesWritten = 0;
+    }
     appendFileSync(DEBUG_LOG, line);
+    dlogBytesWritten += lineBytes;
   } catch {}
 }
 
@@ -347,6 +364,14 @@ function createTray() {
       label: serverPort ? `Relay: http://localhost:${serverPort}` : "Relay: not running",
       enabled: !!serverPort,
       click: () => serverPort && shell.openExternal(`http://localhost:${serverPort}`)
+    },
+    {
+      label: "Start at login",
+      type: "checkbox",
+      checked: app.getLoginItemSettings().openAtLogin,
+      click: (/** @type {import("electron").MenuItem} */ item) => {
+        app.setLoginItemSettings({ openAtLogin: item.checked });
+      }
     },
     { type: "separator" },
     {

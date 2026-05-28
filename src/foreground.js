@@ -1,10 +1,19 @@
 // @ts-check
 // Win32 FFI helpers used by dictation:
-//   1. captureForegroundWindow / restoreForegroundWindow — remember which app
-//      was focused when the hotkey was pressed so we can paste back into it,
-//      even if Electron stole focus during the IPC round-trip.
+//   1. captureForegroundWindow / restoreForegroundWindow / getWindowRect —
+//      remember which app was focused when the hotkey was pressed so we can
+//      paste back into it, even if Electron stole focus during the IPC
+//      round-trip, and locate its on-screen rect to anchor the pill.
 //   2. isRightAltDown / isRightCtrlDown — synchronous physical-key state
 //      queries the polling hotkey loop in src/hotkey.js calls at ~30 Hz.
+//
+// All koffi/user32 calls are gated behind `isWin`. On macOS / Linux the
+// capture/restore/getWindowRect exports are stubs that return null/false —
+// the pill falls back to top-right of the cursor's display, and Electron
+// generally doesn't steal focus during IPC on macOS the way it does on
+// Windows, so focus restoration is a no-op. The key-state exports return
+// false on non-Win because the only caller (the polling hotkey loop) is
+// itself Windows-only — Mac uses uiohook-napi's event-based path instead.
 
 import koffi from "koffi";
 

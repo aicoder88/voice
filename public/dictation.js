@@ -164,8 +164,13 @@ async function startRecording(profile) {
   bytesStreamed = 0;
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+  // Boost mic input before quantization so distant/quiet speech reaches
+  // Deepgram's energy threshold. Override at runtime via
+  // `window.DICTATION_INPUT_GAIN = <positive finite number>` for A/B testing.
+  const gainOverride = Number(window.DICTATION_INPUT_GAIN);
+  const inputGain = Number.isFinite(gainOverride) && gainOverride > 0 ? gainOverride : 2.5;
   processorNode = new AudioWorkletNode(audioContext, "audio-capture-processor", {
-    processorOptions: { outputRate: targetSampleRate }
+    processorOptions: { outputRate: targetSampleRate, inputGain }
   });
   muteNode = audioContext.createGain();
   muteNode.gain.value = 0;

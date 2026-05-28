@@ -5,6 +5,7 @@
 // here from public/realtime-voice-agent/audio-utils.js by design.
 
 const DEFAULT_BATCH_SIZE = 4096;
+const DEFAULT_INPUT_GAIN = 2.5;
 
 class AudioCaptureProcessor extends AudioWorkletProcessor {
   constructor(options) {
@@ -12,6 +13,15 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     const opts = (options && options.processorOptions) || {};
     this.outputRate = opts.outputRate;
     this.batchSize = opts.batchSize || DEFAULT_BATCH_SIZE;
+    // Input gain boost applied before downsample/quantize so quiet/distant
+    // speakers cross Deepgram's energy threshold. Soft-clipped to avoid
+    // hard-clipping artifacts on loud syllables/plosives.
+    const rawGain = Number(opts.inputGain);
+    this.inputGain = Number.isFinite(rawGain) && rawGain > 0 ? rawGain : DEFAULT_INPUT_GAIN;
+    // Precompute tanh(gain) so the per-sample soft-clip is one Math.tanh + one
+    // multiply (no branches). Formula: y = tanh(gain*x) / tanh(gain) — smooth,
+    // shape-preserving, asymptotes to ±1.0 so quantizer never hard-clips.
+    this.softClipNorm = 1 / Math.tanh(this.inputGain);
     this.buffer = new Float32Array(this.batchSize);
     this.bufferIndex = 0;
   }
@@ -20,9 +30,12 @@ class AudioCaptureProcessor extends AudioWorkletProcessor {
     const input = inputs[0];
     if (!input || !input[0]) return true;
     const channel = input[0];
+    const gain = this.inputGain;
+    const norm = this.softClipNorm;
 
     for (let i = 0; i < channel.length; i += 1) {
-      this.buffer[this.bufferIndex++] = channel[i];
+      // Branchless soft-clip: tanh saturates smoothly, norm rescales so |y|<=1.
+      this.buffer[this.bufferIndex++] = Math.tanh(gain * channel[i]) * norm;
       if (this.bufferIndex >= this.batchSize) {
         this.flush();
         this.bufferIndex = 0;
