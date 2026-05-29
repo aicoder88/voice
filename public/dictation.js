@@ -9,9 +9,19 @@ let sourceNode = null;
 let processorNode = null;
 let muteNode = null;
 let isRecording = false;
+let captureReady = false;
 let transcriptParts = [];
 let lastFinalAt = 0;
 let alreadyFinalized = false;
+
+// Rolling pre-roll buffer of the most recent mic audio. The capture pipeline
+// runs continuously once warmed, so on key-press we can flush the last ~600ms
+// into the buffer — this recovers words the speaker began saying right as (or
+// just before) they pressed the key, the audio a cold-start mic would drop.
+const PREROLL_MS = 600;
+const PREROLL_MAX_BYTES = Math.round((targetSampleRate * 2 * PREROLL_MS) / 1000);
+let prerollChunks = [];
+let prerollBytes = 0;
 
 function log(line) {
   const ts = new Date().toLocaleTimeString();
@@ -111,6 +121,58 @@ function finalizeAndSend(text) {
   transcriptParts = [];
 }
 
+// Bring the mic + worklet pipeline up once and leave it running. Idempotent:
+// later calls return immediately. Captured frames feed the rolling pre-roll
+// buffer always, and stream to the socket only while isRecording is true.
+//
+// AGC / noise-suppression / echo-cancellation are all OFF on purpose: they
+// degrade Whisper accuracy. AGC ramps gain down during silence and lags on the
+// first word; noise suppression can clip speech onsets. Whisper wants the raw
+// signal.
+async function initCapture() {
+  if (captureReady) return;
+  audioContext = audioContext || new AudioContext();
+  if (audioContext.state === "suspended") await audioContext.resume();
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: {
+      channelCount: 1,
+      echoCancellation: false,
+      noiseSuppression: false,
+      autoGainControl: false
+    }
+  });
+
+  await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+  sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  processorNode = new AudioWorkletNode(audioContext, "audio-capture-processor", {
+    processorOptions: { outputRate: targetSampleRate }
+  });
+  muteNode = audioContext.createGain();
+  muteNode.gain.value = 0;
+
+  processorNode.port.onmessage = (event) => {
+    const { pcm16 } = event.data;
+    // Maintain the rolling pre-roll window regardless of recording state.
+    prerollChunks.push(pcm16);
+    prerollBytes += pcm16.byteLength;
+    while (prerollBytes > PREROLL_MAX_BYTES && prerollChunks.length > 1) {
+      prerollBytes -= prerollChunks.shift().byteLength;
+    }
+    if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
+    socket.send(
+      JSON.stringify({
+        type: "input_audio_buffer.append",
+        audio: arrayBufferToBase64(pcm16)
+      })
+    );
+  };
+
+  sourceNode.connect(processorNode);
+  processorNode.connect(muteNode);
+  muteNode.connect(audioContext.destination);
+  captureReady = true;
+}
+
 async function startRecording() {
   if (isRecording) return;
   setStatus("Connecting…");
@@ -123,17 +185,12 @@ async function startRecording() {
   }
 
   try {
-    audioContext = audioContext || new AudioContext();
+    await initCapture();
+    // The pipeline persists across presses; the OS may have suspended the
+    // context (e.g. after sleep). Resume so frames flow again.
     if (audioContext.state === "suspended") await audioContext.resume();
-    mediaStream = await navigator.mediaDevices.getUserMedia({
-      audio: {
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true
-      }
-    });
   } catch (error) {
+    captureReady = false;
     setStatus("Mic blocked");
     window.dictationBridge.sendError("Microphone not available: " + error.message);
     return;
@@ -142,30 +199,21 @@ async function startRecording() {
   transcriptParts = [];
   alreadyFinalized = false;
   isRecording = true;
-  sourceNode = audioContext.createMediaStreamSource(mediaStream);
-  await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
-  processorNode = new AudioWorkletNode(audioContext, "audio-capture-processor", {
-    processorOptions: { outputRate: targetSampleRate }
-  });
-  muteNode = audioContext.createGain();
-  muteNode.gain.value = 0;
 
-  processorNode.port.onmessage = (event) => {
-    if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
-    const { pcm16 } = event.data;
-    socket.send(
-      JSON.stringify({
-        type: "input_audio_buffer.append",
-        audio: arrayBufferToBase64(pcm16)
-      })
-    );
-  };
+  // Flush the pre-roll so the opening words aren't lost to the press itself.
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    for (const buf of prerollChunks) {
+      socket.send(
+        JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: arrayBufferToBase64(buf)
+        })
+      );
+    }
+  }
 
-  sourceNode.connect(processorNode);
-  processorNode.connect(muteNode);
-  muteNode.connect(audioContext.destination);
   setStatus("Listening");
-  log("Mic started");
+  log("Mic started (preroll " + prerollBytes + "B)");
 }
 
 function stopRecording() {
@@ -174,16 +222,7 @@ function stopRecording() {
   setStatus("Finalizing…");
   log("Mic stopped, committing buffer");
 
-  try {
-    processorNode?.disconnect();
-    sourceNode?.disconnect();
-    muteNode?.disconnect();
-    mediaStream?.getTracks().forEach((t) => t.stop());
-  } catch {}
-  processorNode = null;
-  sourceNode = null;
-  muteNode = null;
-  mediaStream = null;
+  // Leave the capture pipeline warm for the next press — only stop streaming.
 
   if (socket && socket.readyState === WebSocket.OPEN) {
     log("Sending commit (socket readyState=" + socket.readyState + ")");

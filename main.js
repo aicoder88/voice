@@ -187,11 +187,14 @@ function setupIpc() {
     const { releaseAt, sinceRelease } = dictation.finalize();
     console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(transcript));
     hidePill();
-    // NOTE: matches historical behavior — on an empty transcript we return
-    // without calling dictation.done(), so `busy` stays true. The session is
-    // unstuck only by the next successful press cycle. Pre-existing quirk;
-    // worth fixing in a follow-up but out of scope for this refactor.
-    if (!transcript || !transcript.trim()) return;
+    // Empty transcript = silence or a filtered hallucination. Reopen the
+    // session immediately (don't wait on the safety timer) so the next press
+    // works right away — empties are now common by design (silence gate +
+    // hallucination filter), so a stuck `busy` flag would be felt constantly.
+    if (!transcript || !transcript.trim()) {
+      dictation.done();
+      return;
+    }
 
     let textToType = transcript.trim();
 

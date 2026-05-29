@@ -23,6 +23,66 @@ const SAMPLE_RATE = 24000;
 // return an empty string immediately.
 const MIN_PCM_BYTES = 4800; // 0.1s @ 24 kHz mono int16
 
+// Silence gate. Whisper hallucinates plausible-but-invented text ("Thank you",
+// "(music)", training-data fragments) when handed a near-silent buffer — the
+// classic failure when the user holds the key but doesn't speak. We refuse to
+// transcribe a buffer whose loudest sample never crosses this int16 amplitude
+// (~1.5% of full scale). Tunable via WHISPER_SILENCE_PEAK; set to 0 to disable.
+const SILENCE_PEAK = Number(process.env.WHISPER_SILENCE_PEAK ?? 500);
+
+// Stock phrases Whisper emits on silence/noise. Matched against the transcript
+// after lowercasing and stripping everything but letters/digits/spaces, so
+// "Thank you." and "thank you" collapse to the same key. Whole-string match
+// only — a real sentence that merely starts with one of these is untouched.
+const HALLUCINATION_PHRASES = new Set([
+  "you", "thank you", "thank you very much", "thanks", "thanks for watching",
+  "thank you for watching", "thanks for watching everyone", "please subscribe",
+  "dont forget to subscribe", "like and subscribe", "bye", "bye bye", "goodbye",
+  "okay", "ok", "so", "hello", "hi", "the", "yeah", "uh", "um", "mm", "mhm",
+  "i", "co authored by", "subtitles by", "transcription by", "transcribed by",
+  "amaraorg", "music", "applause", "silence", "blank audio"
+]);
+
+/**
+ * Peak absolute amplitude across an int16 PCM buffer (0..32768).
+ *
+ * @param {Buffer} pcm
+ * @returns {number}
+ */
+function peakAmplitude(pcm) {
+  const samples = new Int16Array(pcm.buffer, pcm.byteOffset, Math.floor(pcm.length / 2));
+  let peak = 0;
+  for (let i = 0; i < samples.length; i += 1) {
+    const a = Math.abs(samples[i]);
+    if (a > peak) peak = a;
+  }
+  return peak;
+}
+
+/**
+ * Strip Whisper's non-speech annotations and reject stock hallucinations.
+ * Bracketed/parenthesized/asterisked spans (e.g. "[BLANK_AUDIO]", "(music)",
+ * "*laughs*") are never produced by literal speech, so they are always sound
+ * tags and get removed. If what remains is empty or a known stock phrase, the
+ * whole thing was noise — return "" so nothing is typed.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+function sanitizeTranscript(text) {
+  if (!text) return "";
+  const stripped = text
+    .replace(/\([^()]*\)/g, " ")
+    .replace(/\[[^\]]*\]/g, " ")
+    .replace(/\*[^*]*\*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!stripped) return "";
+  const normalized = stripped.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
+  if (HALLUCINATION_PHRASES.has(normalized)) return "";
+  return stripped;
+}
+
 // Whisper's initial-prompt accepts ~224 tokens (~1000 chars of typical
 // English). Anything longer gets silently truncated by the model, so we
 // truncate here too and surface it in the load log.
@@ -186,16 +246,10 @@ export async function attach(clientSocket, { bin, model }) {
 
   console.error("[relay] whisper-local session opened");
 
-  try {
-    await ensureWhisperServer(bin);
-  } catch (err) {
-    console.error("[relay] whisper-server boot failed, will use CLI fallback:", err.message);
-  }
-
-  if (clientSocket.readyState !== clientSocket.OPEN) return;
-
-  sendToClient(clientSocket, { type: "local.status", status: "connected", provider: "whisper-local", model });
-
+  // Register the audio listener BEFORE warming the server. The client flushes
+  // a pre-roll burst the instant the socket opens; appended frames only land
+  // in audioChunks (no server needed), so capturing them early costs nothing
+  // and closes the warm-up race that would otherwise drop the opening words.
   clientSocket.on("message", async (message) => {
     let parsed;
     try { parsed = JSON.parse(message.toString()); } catch { return; }
@@ -219,9 +273,24 @@ export async function attach(clientSocket, { bin, model }) {
         });
         return;
       }
+      if (SILENCE_PEAK > 0) {
+        const peak = peakAmplitude(pcm);
+        if (peak < SILENCE_PEAK) {
+          console.error("[relay] whisper-local silence gate: peak " + peak + " < " + SILENCE_PEAK + ", sending empty");
+          sendToClient(clientSocket, {
+            type: "conversation.item.input_audio_transcription.completed",
+            transcript: ""
+          });
+          return;
+        }
+      }
       try {
         const prompt = await loadPrompt();
-        const transcript = await transcribePcm(pcm, SAMPLE_RATE, bin, model, prompt);
+        const raw = await transcribePcm(pcm, SAMPLE_RATE, bin, model, prompt);
+        const transcript = sanitizeTranscript(raw);
+        if (raw && !transcript) {
+          console.error("[relay] whisper-local sanitizer dropped: " + JSON.stringify(raw));
+        }
         sendToClient(clientSocket, {
           type: "conversation.item.input_audio_transcription.completed",
           transcript
@@ -237,6 +306,19 @@ export async function attach(clientSocket, { bin, model }) {
   clientSocket.on("close", () => {
     audioChunks.length = 0;
   });
+
+  // Warm the server (cached after the first session) and announce readiness.
+  // Frames that arrive during this await are already being buffered by the
+  // listener above; commit only fires on key-release, long after this resolves.
+  try {
+    await ensureWhisperServer(bin);
+  } catch (err) {
+    console.error("[relay] whisper-server boot failed, will use CLI fallback:", err.message);
+  }
+
+  if (clientSocket.readyState !== clientSocket.OPEN) return;
+
+  sendToClient(clientSocket, { type: "local.status", status: "connected", provider: "whisper-local", model });
 }
 
 /**

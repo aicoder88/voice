@@ -1,24 +1,23 @@
 // @ts-check
 import { uIOhook, UiohookKey } from "uiohook-napi";
 
-// uiohook-napi's UiohookKey type exposes AltRight/Alt but not the AltLeft and
-// AltGraph constants some platforms emit. We probe via bracket access (which
-// types as `any`) and filter out the undefineds at runtime.
+// We bind ONLY the right Option / right Alt key. uiohook reports it as
+// UiohookKey.AltRight (0x0E38 = 3640) on every platform we target; the left
+// Option/Alt key reports UiohookKey.Alt (0x0038 = 56) and must NOT trigger
+// dictation. Bracket access types as `any`, so we filter undefineds at
+// runtime in case a future uiohook build drops the constant.
 /** @type {Record<string, number | undefined>} */
 const keyCodes = UiohookKey;
 const ALT_KEYCODES = new Set(
   [
     keyCodes.AltRight,
-    keyCodes.AltLeft,
-    keyCodes.Alt,
-    keyCodes.AltGraph,
-    3640,
-    56
+    3640
   ].filter((v) => typeof v === "number")
 );
 
 /**
- * Start listening for the global Alt-right hotkey via uiohook-napi. Calls
+ * Start listening for the global right-Option (right-Alt) hotkey via
+ * uiohook-napi. Calls
  * `onPress` on the first qualifying keydown, `onRelease` on the subsequent
  * keyup. Returns a disposer that detaches both listeners and stops uIOhook.
  *
