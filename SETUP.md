@@ -4,8 +4,32 @@ Wispr Flow-style push-to-talk dictation. Hold **Right Alt** anywhere on Windows,
 
 ## One-time setup
 
-1. Open `C:\dev\voice\.env` and paste your OpenAI API key after `OPENAI_API_KEY=`.
-2. (Already done if you cloned fresh) Install dependencies:
+### Option A — Local Whisper on Windows (no per-clip API cost)
+
+Runs the whole pipeline on your PC: a small Whisper model transcribes the clip, optional cleanup model polishes it.
+
+1. Install dependencies:
+   ```powershell
+   npm install
+   ```
+2. Download whisper.cpp binaries + GGML model. From the repo root:
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File .\scripts\setup-whisper-windows.ps1
+   ```
+   Pulls ~400 MB of CUDA binaries into `bin\` and a ~190 MB multilingual quantized model into `models\`. Re-runnable — skips files that already exist. CPU-only machines: add `-Variant cpu`. Different model: `-Model ggml-small.en-q5_1.bin` etc.
+3. Confirm `.env` has these lines (the setup script prints the right values at the end):
+   ```
+   STT_PROVIDER=whisper-local
+   WHISPER_BIN=C:\dev\voice\bin\whisper-cli.exe
+   WHISPER_MODEL=C:\dev\voice\models\ggml-small-q5_1.bin
+   ```
+4. (Optional) For LLM cleanup, paste an Anthropic or OpenAI key in `.env`. Without one, raw Whisper text is typed as-is.
+
+### Option B — OpenAI Realtime (Mac or Windows, pay per clip)
+
+1. Open `.env` and paste your OpenAI API key after `OPENAI_API_KEY=`.
+2. Set `STT_PROVIDER=openai` (or leave unset — openai is the default).
+3. Install dependencies if you haven't:
    ```
    npm install
    ```
@@ -30,8 +54,12 @@ An Electron window opens with status info. A tray icon shows up in the system tr
 
 | Variable | Default | What it does |
 |---|---|---|
-| `OPENAI_API_KEY` | *(empty)* | Required. Your OpenAI key. |
-| `OPENAI_REALTIME_MODEL` | `gpt-realtime-whisper` | Speech-to-text model. |
+| `STT_PROVIDER` | `openai` | `openai`, `whisper-local`, or `deepgram`. Picks which speech-to-text backend the dictation window opens. |
+| `OPENAI_API_KEY` | *(empty)* | Required for `openai` provider and (by default) for cleanup. |
+| `OPENAI_REALTIME_MODEL` | `gpt-realtime-whisper` | Speech-to-text model when `STT_PROVIDER=openai`. |
+| `WHISPER_BIN` | `whisper-cli` | Full path to whisper.cpp's `whisper-cli.exe`. Set by the Windows setup script. |
+| `WHISPER_MODEL` | `./models/ggml-small.en-q5_1.bin` | Full path to a GGML model file. Set by the Windows setup script. |
+| `WHISPER_PORT` | `8081` | Port the whisper-server child process listens on. |
 | `CLEANUP_ENABLED` | `true` | LLM polish (punctuation, remove "um"/"uh"). |
 | `CLEANUP_MODEL` | `gpt-4.1-nano` | Cleanup model. Cheap and fast. |
 | `TYPE_VIA_CLIPBOARD` | `true` | Paste vs simulated keystrokes. Paste is faster and more reliable. |

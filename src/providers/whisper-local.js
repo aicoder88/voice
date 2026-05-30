@@ -155,10 +155,14 @@ let exitHandlerInstalled = false;
  * @param {string} [bin]
  * @returns {Promise<void>}
  */
-function ensureWhisperServer(bin) {
+export function ensureWhisperServer(bin) {
   if (whisperServerReady) return whisperServerReady;
 
-  const serverBin = bin ? bin.replace(/-cli$/, "-server") : "whisper-server";
+  // Replace the trailing "-cli" (with optional .exe suffix on Windows) with
+  // "-server". Previous regex (/-cli$/) missed the .exe case and ended up
+  // spawning whisper-cli.exe with server-style flags, which printed help and
+  // exited.
+  const serverBin = bin ? bin.replace(/-cli(\.exe)?$/i, "-server$1") : "whisper-server";
   const model = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin";
   const port = process.env.WHISPER_PORT || "8081";
   const baseUrl = `http://127.0.0.1:${port}`;
@@ -169,7 +173,11 @@ function ensureWhisperServer(bin) {
       "--host", "127.0.0.1",
       "--port", port,
       "-t", "4",
-      "--no-fallback"
+      "--no-fallback",
+      // GPU is on by default in the CUDA build (no -ng flag). -fa enables
+      // flash-attention. Pass explicitly so future "why is this slow" debugs
+      // don't have to guess.
+      "-fa"
     ];
     let spawnError = null;
     whisperServerProc = spawn(serverBin, args);
@@ -178,9 +186,19 @@ function ensureWhisperServer(bin) {
       console.error("[whisper-server] spawn error:", err.message);
       whisperServerProc = null;
     });
+    // Surface init lines so we can see whether CUDA actually initialized.
+    // Once "server is listening" appears we stop being chatty.
+    let serverReady = false;
     whisperServerProc.stderr?.on("data", (d) => {
       const s = d.toString();
-      if (/error|fail/i.test(s)) console.error("[whisper-server]", s.trim());
+      if (!serverReady) {
+        if (/CUDA|GPU|cublas|listening|loaded|error|fail/i.test(s)) {
+          console.error("[whisper-server]", s.trim());
+        }
+        if (/listening/i.test(s)) serverReady = true;
+      } else if (/error|fail/i.test(s)) {
+        console.error("[whisper-server]", s.trim());
+      }
     });
     whisperServerProc.on("exit", (code) => {
       console.error("[whisper-server] exited with code " + code);

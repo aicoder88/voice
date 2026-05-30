@@ -11,21 +11,28 @@ import { sendToClient, forwardUnexpectedResponse } from "./_shared.js";
 
 /**
  * @param {WebSocket} clientSocket
- * @param {{ apiKey: string, model: string }} opts
+ * @param {{ apiKey: string, model: string, language?: string }} opts
  */
-export function attach(clientSocket, { apiKey, model }) {
+export function attach(clientSocket, { apiKey, model, language }) {
+  // Re-read env on every connection so a runtime toggle (Right-Ctrl tap in
+  // main.js) takes effect on the next dictation without a server restart.
+  const lang = (language || process.env.WHISPER_LANGUAGE || "hr").toLowerCase();
   const params = new URLSearchParams({
     model,
-    language: "multi",
+    language: lang,
     encoding: "linear16",
     sample_rate: "24000",
     channels: "1",
     punctuate: "true",
-    smart_format: "true",
     interim_results: "true",
     endpointing: "false",
     vad_events: "false"
   });
+  // smart_format is English-only on Deepgram. Adding it with language=hr (or
+  // any other non-English) returns HTTP 400 at the WS handshake.
+  if (lang === "en" || lang === "en-us" || lang === "en-gb") {
+    params.set("smart_format", "true");
+  }
   const dgUrl = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
   const dgSocket = new WebSocket(dgUrl, {
     headers: { Authorization: `Token ${apiKey}` }

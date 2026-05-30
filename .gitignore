@@ -1,10 +1,27 @@
 node_modules/
 .env
+dist/
 *.bak
 .DS_Store
 AGENTS.md
 OPENAI_KEY_AUDIT.md
 npm-debug.log*
+
+# Runtime debug + boot logs written by the Electron main process.
+debug.log
+boot.out.log
+boot.err.log
+app.log
+app.err.log
+stdout.log
+stderr.log
+stdout2.log
+stderr2.log
+push.out
+push.err
+
+# whisper.cpp Windows binaries — platform-specific, fetched by setup script.
+bin/
 
 # whisper.cpp model weights — fetched per machine, not tracked.
 # Use models/* (not models/) so we can negate the rule for vocab.txt below.

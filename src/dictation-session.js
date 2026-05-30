@@ -21,7 +21,7 @@
 
 export class DictationSession {
   /** @param {DictationSessionOptions} [options] */
-  constructor({ safetyTimeoutMs = 1500, log = console.error } = {}) {
+  constructor({ safetyTimeoutMs = 500, log = console.error } = {}) {
     /** @type {boolean} */
     this.busy = false;
     /** @type {number | null} */

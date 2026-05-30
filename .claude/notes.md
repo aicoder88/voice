@@ -43,3 +43,33 @@ Rejected (one line each):
   dictation renderer, so any stall is invisible to the user.
 - Utterance-ID tagging for timers: the stale failure timer is already cleared
   on the next startRecording(), so the real path is covered.
+
+## Merge with origin/main (parallel work from another machine)
+
+origin/main had diverged 6 commits (single-instance lock, foreground-window
+capture/restore, GetAsyncKeyState Windows hotkey + right-Ctrl hr/en toggle,
+Croatian/Deepgram, input-gain worklet, log rotation, Mac restore, hi-DPI tray
+icons). User chose "combine everything, this computer's recording pipeline wins
+on conflicts." Resolution:
+- hotkey.js: took origin/main's platform-split detector (superset; carries the
+  Croatian toggle). Not part of the recording pipeline.
+- dictation.js: took THIS computer's pipeline (pre-roll, AGC off, warm capture,
+  backup hooks), then grafted the Deepgram language profile so the Croatian
+  toggle still works. Dropped the server's per-press worklet setup + 30s cap.
+- whisper-local.js: auto-merged cleanly — kept this computer's silence gate +
+  sanitizer + the wrapWav move, plus the server's ensureWhisperServer
+  improvements (.exe handling, -fa GPU flag, stderr filtering).
+- main.js: combined both — server's single-instance/foreground/log-rotation/
+  language wiring + my backup IPC. processTranscript now also strips Whisper
+  noise tokens and restores foreground focus before pasting (live path passes
+  the saved hwnd; retry passes none).
+
+JUDGMENT CALL to flag: the merged worklet applies a 2.5x soft-clipped input
+gain (server's audio tuning). initCapture now passes it explicitly
+(window.DICTATION_INPUT_GAIN overrides). This rides inside this computer's
+pipeline because it helps the kept Deepgram/Croatian path and is runtime-
+tunable; flip the default to 1 (≈linear) if raw-signal Whisper accuracy
+regresses.
+
+Verified post-merge: all JS syntax OK, parity 5/5, backup e2e (round-trip,
+prune, traversal guard, live retranscribe) pass.

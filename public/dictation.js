@@ -13,6 +13,9 @@ let captureReady = false;
 let transcriptParts = [];
 let lastFinalAt = 0;
 let alreadyFinalized = false;
+// Per-press profile from main: { language, model } for Deepgram (right-Ctrl
+// toggles hr/en). null = use the URL-default behavior. Read by ensureSocket.
+let activeProfile = null;
 
 // Full audio of the current utterance (pre-roll + everything streamed while
 // recording), kept as a list of Uint8Array PCM16 chunks. This is the backup:
@@ -67,12 +70,19 @@ async function ensureSocket() {
     // model. The relay reads ?model=, switches the upstream session into
     // STT-only shape, and sends its own session.update on open — we do not
     // need to send one from here. See docs/RELAY_PROTOCOL.md.
-    const url =
-      provider === "deepgram"
-        ? `ws://${window.location.host}/realtime?provider=deepgram`
-        : provider === "whisper-local" || provider === "local"
-          ? `ws://${window.location.host}/realtime?provider=whisper-local`
-          : `ws://${window.location.host}/realtime?model=gpt-realtime-whisper`;
+    let url;
+    if (provider === "deepgram") {
+      // Carry the per-press language/model profile (right-Ctrl toggles hr/en)
+      // through to the relay so Deepgram transcribes in the chosen language.
+      const params = new URLSearchParams({ provider: "deepgram" });
+      if (activeProfile?.language) params.set("language", activeProfile.language);
+      if (activeProfile?.model) params.set("model", activeProfile.model);
+      url = `ws://${window.location.host}/realtime?${params.toString()}`;
+    } else if (provider === "whisper-local" || provider === "local") {
+      url = `ws://${window.location.host}/realtime?provider=whisper-local`;
+    } else {
+      url = `ws://${window.location.host}/realtime?model=gpt-realtime-whisper`;
+    }
     const thisSocket = new WebSocket(url);
     socket = thisSocket;
     thisSocket.addEventListener("open", () => {
@@ -206,8 +216,13 @@ async function initCapture() {
 
   await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
+  // Input gain is applied (soft-clipped) in the worklet so quiet/distant
+  // speech crosses Deepgram's energy threshold. Override at runtime via
+  // `window.DICTATION_INPUT_GAIN = <positive finite number>` for A/B testing.
+  const gainOverride = Number(window.DICTATION_INPUT_GAIN);
+  const inputGain = Number.isFinite(gainOverride) && gainOverride > 0 ? gainOverride : 2.5;
   processorNode = new AudioWorkletNode(audioContext, "audio-capture-processor", {
-    processorOptions: { outputRate: targetSampleRate }
+    processorOptions: { outputRate: targetSampleRate, inputGain }
   });
   muteNode = audioContext.createGain();
   muteNode.gain.value = 0;
@@ -241,8 +256,12 @@ async function initCapture() {
   captureReady = true;
 }
 
-async function startRecording() {
+async function startRecording(profile) {
   if (isRecording) return;
+  activeProfile = profile || null;
+  if (activeProfile) {
+    log("Profile: lang=" + (activeProfile.language || "default") + " model=" + (activeProfile.model || "default"));
+  }
   setStatus("Connecting…");
   try {
     await ensureSocket();
@@ -333,7 +352,7 @@ function stopRecording() {
   }, FAILURE_MS);
 }
 
-window.dictationBridge.onStart(() => startRecording());
+window.dictationBridge.onStart((profile) => startRecording(profile));
 window.dictationBridge.onStop(() => stopRecording());
 
 function arrayBufferToBase64(buffer) {
