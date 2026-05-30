@@ -15,7 +15,7 @@ import { writeFile, unlink, mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { sendToClient } from "./_shared.js";
+import { sendToClient, wrapWav } from "./_shared.js";
 
 const SAMPLE_RATE = 24000;
 // Anything shorter than this is almost certainly a misfire (the user tapped
@@ -377,36 +377,6 @@ async function runWhisperServer(url, wavBuffer, prompt) {
   const json = await res.json();
   const text = (json.text || "").replace(/\s+/g, " ").trim();
   return text;
-}
-
-/**
- * 44-byte canonical PCM16 WAV header. Mono, 16-bit, caller-supplied rate.
- *
- * @param {Buffer} pcm
- * @param {number} sampleRate
- * @returns {Buffer}
- */
-function wrapWav(pcm, sampleRate) {
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  const byteRate = sampleRate * numChannels * bitsPerSample / 8;
-  const blockAlign = numChannels * bitsPerSample / 8;
-  const dataSize = pcm.length;
-  const header = Buffer.alloc(44);
-  header.write("RIFF", 0);
-  header.writeUInt32LE(36 + dataSize, 4);
-  header.write("WAVE", 8);
-  header.write("fmt ", 12);
-  header.writeUInt32LE(16, 16);
-  header.writeUInt16LE(1, 20);
-  header.writeUInt16LE(numChannels, 22);
-  header.writeUInt32LE(sampleRate, 24);
-  header.writeUInt32LE(byteRate, 28);
-  header.writeUInt16LE(blockAlign, 32);
-  header.writeUInt16LE(bitsPerSample, 34);
-  header.write("data", 36);
-  header.writeUInt32LE(dataSize, 40);
-  return Buffer.concat([header, pcm]);
 }
 
 /**

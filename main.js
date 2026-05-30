@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
+import { saveBackup, readBackupPcm, deleteBackup, retranscribe, pruneBackups } from "./src/backup.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
@@ -23,6 +24,10 @@ let mainWindow = null;
 let pillWindow = null;
 /** @type {import("electron").BrowserWindow | null} */
 let dictationWindow = null;
+/** @type {import("electron").BrowserWindow | null} */
+let backupWindow = null;
+/** @type {string | null} */
+let recordingsDir = null;
 /** @type {import("electron").Tray | null} */
 let tray = null;
 /** @type {number | null} */
@@ -52,7 +57,7 @@ async function bootRelayServer() {
     return null;
   }
   try {
-    const result = await startServer();
+    const result = await startServer({ recordingsDir });
     serverPort = result.port;
     return result;
   } catch (error) {
@@ -182,6 +187,51 @@ async function setupHotkey() {
   }
 }
 
+// Clean up a raw transcript (optional LLM polish + trailing punctuation) and
+// type it into the focused app. Shared by the live dictation path and the
+// backup retry path. Returns the text that was typed, or null if there was
+// nothing to type.
+//
+// @param {string} transcript
+// @returns {Promise<string | null>}
+async function processTranscript(transcript) {
+  if (!transcript || !transcript.trim()) return null;
+  let textToType = transcript.trim();
+
+  const cleanupEnabled = process.env.CLEANUP_ENABLED !== "false";
+  const commaCount = (textToType.match(/,/g) || []).length;
+  const needsCleanup =
+    textToType.length > 120 ||
+    /\b(uh|um|uhh|er|erm)\b/i.test(textToType) ||
+    !/[.!?…]$/.test(textToType) ||
+    /\b(first|second|third|fourth|fifth|next,|finally,)\b/i.test(textToType) ||
+    commaCount >= 4;
+  if (cleanupEnabled && needsCleanup) {
+    const t0 = Date.now();
+    try {
+      const { polishTranscript } = await import("./src/cleanup.js");
+      textToType = await polishTranscript(textToType);
+      console.error("[main] cleanup done (" + (Date.now() - t0) + "ms):", JSON.stringify(textToType));
+    } catch (error) {
+      console.error("[main] Cleanup pass failed, using raw:", error.message);
+    }
+  } else {
+    console.error("[main] cleanup SKIPPED (short/clean, length=" + textToType.length + ")");
+  }
+
+  textToType = (textToType || "").trim();
+  if (!textToType) return null;
+  if (!/[.!?…,;:"')\]]$/.test(textToType)) {
+    textToType += ".";
+  }
+
+  const tType = Date.now();
+  const { typeText } = await import("./src/typing.js");
+  await typeText(textToType);
+  console.error("[main] paste done (" + (Date.now() - tType) + "ms paste)");
+  return textToType;
+}
+
 function setupIpc() {
   ipcMain.on("dictation:transcript", async (_event, transcript) => {
     const { releaseAt, sinceRelease } = dictation.finalize();
@@ -196,40 +246,9 @@ function setupIpc() {
       return;
     }
 
-    let textToType = transcript.trim();
-
-    const cleanupEnabled = process.env.CLEANUP_ENABLED !== "false";
-    const commaCount = (textToType.match(/,/g) || []).length;
-    const needsCleanup =
-      textToType.length > 120 ||
-      /\b(uh|um|uhh|er|erm)\b/i.test(textToType) ||
-      !/[.!?…]$/.test(textToType) ||
-      /\b(first|second|third|fourth|fifth|next,|finally,)\b/i.test(textToType) ||
-      commaCount >= 4;
-    if (cleanupEnabled && needsCleanup) {
-      const t0 = Date.now();
-      try {
-        const { polishTranscript } = await import("./src/cleanup.js");
-        textToType = await polishTranscript(textToType);
-        console.error("[main] cleanup done (" + (Date.now() - t0) + "ms):", JSON.stringify(textToType));
-      } catch (error) {
-        console.error("[main] Cleanup pass failed, using raw:", error.message);
-      }
-    } else {
-      console.error("[main] cleanup SKIPPED (short/clean, length=" + textToType.length + ")");
-    }
-
-    textToType = (textToType || "").trim();
-    if (textToType && !/[.!?…,;:"')\]]$/.test(textToType)) {
-      textToType += ".";
-    }
-
     try {
-      const tType = Date.now();
-      const { typeText } = await import("./src/typing.js");
-      await typeText(textToType);
-      const totalSinceRelease = Date.now() - releaseAt;
-      console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, " + totalSinceRelease + "ms total since release)");
+      await processTranscript(transcript);
+      console.error("[main] total since release: " + (Date.now() - releaseAt) + "ms");
     } catch (error) {
       console.error("[main] Typing failed:", error.stack || error.message);
     } finally {
@@ -237,11 +256,91 @@ function setupIpc() {
     }
   });
 
+  // A dictation couldn't be transcribed but audio was captured. Save it and
+  // open the pop-up offering Retry / Play so the recording is never lost.
+  ipcMain.on("dictation:failure", async (_event, payload) => {
+    dictation.finalize();
+    hidePill();
+    dictation.done();
+    try {
+      const chunks = (payload && payload.chunks) || [];
+      const pcm = Buffer.concat(chunks.map((b64) => Buffer.from(b64, "base64")));
+      const { name } = await saveBackup({
+        dir: recordingsDir,
+        pcm,
+        timestamp: Date.now(),
+        sampleRate: payload && payload.sampleRate
+      });
+      console.error("[main] dictation backup saved:", name, "(" + pcm.length + " bytes)");
+      openBackupWindow(name, (payload && payload.reason) || "Transcription failed.");
+    } catch (error) {
+      console.error("[main] Failed to save dictation backup:", error.stack || error.message);
+    }
+  });
+
+  // Retry: re-transcribe a saved recording through the relay. On success, type
+  // it in and delete the backup. Returns a result the pop-up shows the user.
+  ipcMain.handle("backup:retry", async (_event, name) => {
+    if (!recordingsDir || !name) return { ok: false, reason: "Recording not found." };
+    if (!serverPort) return { ok: false, reason: "The transcriber isn't running." };
+    const path = join(recordingsDir, name);
+    try {
+      const pcm = await readBackupPcm(path);
+      const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+      const transcript = await retranscribe(pcm, { host: `127.0.0.1:${serverPort}`, provider });
+      if (!transcript || !transcript.trim()) {
+        return { ok: false, reason: "Still couldn't make out any speech. Try playing it back." };
+      }
+      const typed = await processTranscript(transcript);
+      if (!typed) return { ok: false, reason: "Nothing to type after cleanup." };
+      await deleteBackup(path);
+      console.error("[main] backup retry succeeded, deleted:", name);
+      return { ok: true, transcript: typed };
+    } catch (error) {
+      console.error("[main] backup retry failed:", error.message);
+      return { ok: false, reason: error.message || "Retry failed." };
+    }
+  });
+
+  ipcMain.on("backup:close", () => {
+    if (backupWindow && !backupWindow.isDestroyed()) backupWindow.hide();
+  });
+
   ipcMain.on("dictation:error", (_event, message) => {
     hidePill();
     dictation.done();
     console.error("Dictation error:", message);
   });
+}
+
+// Show the backup pop-up for a saved recording. Recreated each failure so the
+// query params (file + reason) are fresh; a prior window is replaced.
+function openBackupWindow(name, reason) {
+  if (!serverPort) return;
+  if (backupWindow && !backupWindow.isDestroyed()) {
+    backupWindow.destroy();
+    backupWindow = null;
+  }
+  backupWindow = new BrowserWindow({
+    width: 440,
+    height: 320,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    fullscreenable: false,
+    title: "Dictation saved",
+    backgroundColor: "#101820",
+    alwaysOnTop: true,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, "preload-backup.cjs")
+    }
+  });
+  const q = `file=${encodeURIComponent(name)}&msg=${encodeURIComponent(reason)}`;
+  backupWindow.loadURL(`http://localhost:${serverPort}/backup-error.html?${q}`);
+  backupWindow.on("closed", () => { backupWindow = null; });
 }
 
 function createTray() {
@@ -311,6 +410,13 @@ function buildAppMenu() {
 }
 
 app.whenReady().then(async () => {
+  recordingsDir = join(app.getPath("userData"), "recordings");
+  // Clear out recordings older than a week so dismissed/played-back backups
+  // don't accumulate. Successful retries already delete their own file.
+  const BACKUP_RETENTION_MS = Number(process.env.BACKUP_RETENTION_DAYS || 7) * 24 * 60 * 60 * 1000;
+  pruneBackups(recordingsDir, BACKUP_RETENTION_MS, Date.now())
+    .then((n) => { if (n) console.error("[main] pruned " + n + " old dictation backup(s)"); })
+    .catch(() => {});
   await bootRelayServer();
   buildAppMenu();
   createMainWindow();

@@ -28,6 +28,7 @@
     "files": [
       "main.js",
       "preload.cjs",
+      "preload-backup.cjs",
       "server.js",
       "realtime-relay.js",
       "src/**/*",

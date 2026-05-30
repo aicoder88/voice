@@ -1,0 +1,118 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Dictation saved</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #101820;
+        color: #e7f5f0;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        -webkit-user-select: none;
+        user-select: none;
+      }
+      .wrap { padding: 22px 24px; display: flex; flex-direction: column; height: 100%; box-sizing: border-box; }
+      h1 { font-size: 17px; margin: 0 0 6px; font-weight: 700; }
+      p { font-size: 13.5px; line-height: 1.5; margin: 0 0 14px; color: #b8d6cd; }
+      .reason { font-size: 12px; color: #7fa39a; margin: -8px 0 16px; }
+      .row { display: flex; gap: 10px; margin-top: auto; }
+      button {
+        flex: 1;
+        font: inherit;
+        font-weight: 650;
+        font-size: 14px;
+        padding: 11px 14px;
+        border-radius: 10px;
+        border: 0;
+        cursor: pointer;
+        transition: filter 0.12s ease, opacity 0.12s ease;
+      }
+      button:hover { filter: brightness(1.08); }
+      button:disabled { opacity: 0.5; cursor: default; }
+      .retry { background: #147c72; color: #fff; }
+      .play { background: #25303a; color: #d7efe8; }
+      .status { font-size: 12.5px; margin: 12px 0 0; min-height: 16px; }
+      .status.ok { color: #6fe0b8; }
+      .status.err { color: #ff9d8a; }
+      .close {
+        position: absolute; top: 10px; right: 14px;
+        background: transparent; color: #6b8a82; font-size: 20px; line-height: 1;
+        width: 28px; flex: none; padding: 4px;
+      }
+    </style>
+  </head>
+  <body>
+    <button class="close" id="close" title="Dismiss">×</button>
+    <div class="wrap">
+      <h1>Your dictation was saved</h1>
+      <p>
+        We couldn't turn your last recording into text, but the audio is safe.
+        Try transcribing it again, or play it back and type it yourself.
+      </p>
+      <div class="reason" id="reason"></div>
+      <div class="status" id="status"></div>
+      <div class="row">
+        <button class="retry" id="retry">Retry</button>
+        <button class="play" id="play">Play recording</button>
+      </div>
+      <audio id="audio" preload="auto"></audio>
+    </div>
+
+    <script>
+      const params = new URLSearchParams(window.location.search);
+      const file = params.get("file") || "";
+      const msg = params.get("msg") || "";
+
+      const reasonEl = document.getElementById("reason");
+      const statusEl = document.getElementById("status");
+      const retryBtn = document.getElementById("retry");
+      const playBtn = document.getElementById("play");
+      const closeBtn = document.getElementById("close");
+      const audio = document.getElementById("audio");
+
+      if (msg) reasonEl.textContent = msg;
+      audio.src = "/recordings/" + encodeURIComponent(file);
+
+      function setStatus(text, kind) {
+        statusEl.textContent = text || "";
+        statusEl.className = "status" + (kind ? " " + kind : "");
+      }
+
+      playBtn.addEventListener("click", () => {
+        if (audio.paused) {
+          audio.currentTime = 0;
+          audio.play().catch(() => setStatus("Couldn't play the recording.", "err"));
+          playBtn.textContent = "Stop";
+        } else {
+          audio.pause();
+          playBtn.textContent = "Play recording";
+        }
+      });
+      audio.addEventListener("ended", () => { playBtn.textContent = "Play recording"; });
+
+      retryBtn.addEventListener("click", async () => {
+        retryBtn.disabled = true;
+        playBtn.disabled = true;
+        setStatus("Transcribing again…");
+        try {
+          const result = await window.backupBridge.retry(file);
+          if (result && result.ok) {
+            setStatus("Done — your text was typed in. Closing…", "ok");
+            setTimeout(() => window.backupBridge.close(), 1200);
+            return;
+          }
+          setStatus((result && result.reason) || "Still couldn't transcribe it. You can play it back instead.", "err");
+        } catch (err) {
+          setStatus("Retry failed: " + (err && err.message ? err.message : String(err)), "err");
+        }
+        retryBtn.disabled = false;
+        playBtn.disabled = false;
+      });
+
+      closeBtn.addEventListener("click", () => window.backupBridge.close());
+    </script>
+  </body>
+</html>

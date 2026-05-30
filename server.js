@@ -2,7 +2,7 @@
 import "dotenv/config";
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import { extname, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { attachRealtimeRelay } from "./realtime-relay.js";
 
@@ -11,7 +11,8 @@ const __dirname = fileURLToPath(new URL(".", import.meta.url));
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8"
+  ".css": "text/css; charset=utf-8",
+  ".wav": "audio/wav"
 };
 
 /**
@@ -19,12 +20,38 @@ const mimeTypes = {
  * `public/` and attaches the realtime relay at `/realtime`. Tries `port`
  * first; if taken, falls back to an OS-chosen free port.
  *
- * @param {{ port?: number, model?: string }} [options]
+ * @param {{ port?: number, model?: string, recordingsDir?: string }} [options]
  * @returns {Promise<{ server: import("node:http").Server, port: number }>}
  */
-export function startServer({ port = Number(process.env.PORT || 3000), model = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2" } = {}) {
+export function startServer({ port = Number(process.env.PORT || 3000), model = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2", recordingsDir } = {}) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host}`);
+
+    // Saved failed-dictation recordings live outside public/ (in the app's
+    // user-data dir) so the pop-up can play them back. Serve them read-only,
+    // guarding against path traversal by allowing only the bare filename.
+    if (recordingsDir && url.pathname.startsWith("/recordings/")) {
+      const name = decodeURIComponent(url.pathname.slice("/recordings/".length));
+      const target = resolve(recordingsDir, name);
+      // Must be a .wav that resolves to a direct child of recordingsDir — this
+      // contains any traversal (../, encoded separators, absolute paths).
+      const base = resolve(recordingsDir);
+      if (extname(name) !== ".wav" || !target.startsWith(base + sep) || target.slice(base.length + 1).includes(sep)) {
+        response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Not found");
+        return;
+      }
+      try {
+        const body = await readFile(target);
+        response.writeHead(200, { "content-type": mimeTypes[".wav"] });
+        response.end(body);
+      } catch {
+        response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        response.end("Not found");
+      }
+      return;
+    }
+
     const pathname = url.pathname === "/" ? "/public/index.html" : `/public${url.pathname}`;
     const filePath = join(__dirname, pathname);
 

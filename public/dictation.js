@@ -14,6 +14,28 @@ let transcriptParts = [];
 let lastFinalAt = 0;
 let alreadyFinalized = false;
 
+// Full audio of the current utterance (pre-roll + everything streamed while
+// recording), kept as a list of Uint8Array PCM16 chunks. This is the backup:
+// if processing fails, it gets shipped to the main process and written to disk
+// so a long dictation is never silently lost. Cleared on success.
+let recordedChunks = [];
+let recordedBytes = 0;
+// True once a terminal frame (transcript OR a server-decided empty) arrives.
+// Distinguishes a real failure (nothing ever came back) from legitimate
+// silence (the relay returns an empty `completed` frame on purpose).
+let gotTerminalEvent = false;
+// One-shot guard so a single failed utterance produces at most one pop-up.
+let failureHandled = false;
+let failureTimer = null;
+
+// Below this the buffer is a misfire (a tap, not a held dictation) — not worth
+// a backup pop-up. 4800 bytes = 0.1s @ 24 kHz mono int16.
+const MIN_FAILURE_BYTES = 4800;
+// How long to wait for ANY terminal frame before declaring the transcriber
+// hung. Deliberately long so slow-but-working transcription of a long clip
+// isn't mistaken for a failure. Separate from the delta-flush fallback below.
+const FAILURE_MS = Number(window.DICTATION_FAILURE_MS || 20000);
+
 // Rolling pre-roll buffer of the most recent mic audio. The capture pipeline
 // runs continuously once warmed, so on key-press we can flush the last ~600ms
 // into the buffer — this recovers words the speaker began saying right as (or
@@ -66,6 +88,9 @@ async function ensureSocket() {
       if (socket === thisSocket) socket = null;
     });
     thisSocket.addEventListener("message", (event) => {
+      // Ignore late frames from a socket we've already replaced — they belong
+      // to a previous utterance and must not flip the current one's state.
+      if (socket !== thisSocket) return;
       try {
         const msg = JSON.parse(event.data);
         handleRealtimeEvent(msg);
@@ -94,6 +119,10 @@ function handleRealtimeEvent(msg) {
     t === "response.text.done" ||
     t === "response.done"
   ) {
+    // A terminal frame arrived — even an empty one (silence gate). This is the
+    // signal that the transcriber did NOT hang, so cancel the failure path.
+    gotTerminalEvent = true;
+    clearFailureTimer();
     const finalText =
       msg.transcript ||
       msg.text ||
@@ -108,17 +137,50 @@ function handleRealtimeEvent(msg) {
 
   if (t === "error" || t === "local.error") {
     log("Error: " + JSON.stringify(msg));
-    window.dictationBridge.sendError(msg.error?.message || msg.message || "unknown error");
+    reportFailure("The transcriber reported an error: " + (msg.error?.message || msg.message || "unknown error"));
   }
+}
+
+function clearFailureTimer() {
+  if (failureTimer) {
+    clearTimeout(failureTimer);
+    failureTimer = null;
+  }
+}
+
+// A dictation couldn't be turned into text. If we captured enough audio, hand
+// the whole recording to the main process so it can be saved and offered back
+// for retry / playback. Otherwise there's nothing worth keeping — just report
+// a plain error. Runs at most once per utterance.
+function reportFailure(reason) {
+  if (failureHandled) return;
+  failureHandled = true;
+  isRecording = false;
+  clearFailureTimer();
+  setStatus("Saved for retry");
+  log("Failure: " + reason + " (" + recordedBytes + "B captured)");
+
+  if (recordedBytes >= MIN_FAILURE_BYTES) {
+    const chunks = recordedChunks.map((u8) => u8ToBase64(u8));
+    window.dictationBridge.reportFailure({ chunks, sampleRate: targetSampleRate, reason });
+  } else {
+    window.dictationBridge.sendError(reason);
+  }
+  recordedChunks = [];
+  recordedBytes = 0;
 }
 
 function finalizeAndSend(text) {
   if (alreadyFinalized) return;
   if (!text || !text.trim()) return;
   alreadyFinalized = true;
+  clearFailureTimer();
   log("Final: " + text);
   window.dictationBridge.sendTranscript(text);
   transcriptParts = [];
+  // Success — drop the backup audio so memory doesn't grow press over press.
+  recordedChunks = [];
+  recordedBytes = 0;
 }
 
 // Bring the mic + worklet pipeline up once and leave it running. Idempotent:
@@ -158,7 +220,13 @@ async function initCapture() {
     while (prerollBytes > PREROLL_MAX_BYTES && prerollChunks.length > 1) {
       prerollBytes -= prerollChunks.shift().byteLength;
     }
-    if (!isRecording || !socket || socket.readyState !== WebSocket.OPEN) return;
+    if (!isRecording) return;
+    // Keep a copy of every recorded frame for the backup. slice(0) detaches it
+    // from the transferred buffer so it survives independently.
+    const copy = new Uint8Array(pcm16.slice(0));
+    recordedChunks.push(copy);
+    recordedBytes += copy.byteLength;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return;
     socket.send(
       JSON.stringify({
         type: "input_audio_buffer.append",
@@ -198,11 +266,21 @@ async function startRecording() {
 
   transcriptParts = [];
   alreadyFinalized = false;
+  gotTerminalEvent = false;
+  failureHandled = false;
+  clearFailureTimer();
+  recordedChunks = [];
+  recordedBytes = 0;
   isRecording = true;
 
   // Flush the pre-roll so the opening words aren't lost to the press itself.
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    for (const buf of prerollChunks) {
+  // The same frames seed the backup buffer so a saved recording matches what
+  // the transcriber actually heard.
+  for (const buf of prerollChunks) {
+    const copy = new Uint8Array(buf.slice(0));
+    recordedChunks.push(copy);
+    recordedBytes += copy.byteLength;
+    if (socket && socket.readyState === WebSocket.OPEN) {
       socket.send(
         JSON.stringify({
           type: "input_audio_buffer.append",
@@ -229,6 +307,10 @@ function stopRecording() {
     socket.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
   } else {
     log("CANNOT send commit, socket=" + !!socket + " readyState=" + (socket ? socket.readyState : "no-socket"));
+    // The connection dropped before we could ask for a transcript, but the
+    // audio is in the backup buffer — save it rather than lose it.
+    reportFailure("Lost the connection to the transcriber before your audio could be sent.");
+    return;
   }
 
   const FALLBACK_MS = Number(window.DICTATION_FALLBACK_MS || 1200);
@@ -240,14 +322,26 @@ function stopRecording() {
     }
     setStatus("Idle");
   }, FALLBACK_MS);
+
+  // Separate, longer watchdog: if NO terminal frame (transcript or a
+  // server-decided empty) ever arrives, the transcriber hung — save the audio
+  // and offer a retry instead of swallowing the dictation.
+  clearFailureTimer();
+  failureTimer = setTimeout(() => {
+    if (alreadyFinalized || gotTerminalEvent || failureHandled) return;
+    reportFailure("The transcriber didn't respond in time.");
+  }, FAILURE_MS);
 }
 
 window.dictationBridge.onStart(() => startRecording());
 window.dictationBridge.onStop(() => stopRecording());
 
 function arrayBufferToBase64(buffer) {
+  return u8ToBase64(new Uint8Array(buffer));
+}
+
+function u8ToBase64(bytes) {
   let binary = "";
-  const bytes = new Uint8Array(buffer);
   for (let i = 0; i < bytes.byteLength; i += 1) {
     binary += String.fromCharCode(bytes[i]);
   }
