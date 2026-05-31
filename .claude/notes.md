@@ -73,3 +73,37 @@ regresses.
 
 Verified post-merge: all JS syntax OK, parity 5/5, backup e2e (round-trip,
 prune, traversal guard, live retranscribe) pass.
+
+## Mic auto-recovery (silent-capture fix)
+
+Symptom: dictation returned empty (`transcript len:0`) after working all
+morning; the local whisper-server was healthy (verified by POSTing a synthesized
+WAV to :8081 — transcribed perfectly). Root cause: the renderer acquired the mic
+ONCE at boot and reused that stream forever; when the external mic was
+unplugged/muted/seized (Teams/call apps present in the audio stack), the stream
+went silent with no recovery and no visible warning — it just typed nothing.
+
+Fix (public/dictation.js + preload.cjs + main.js): three detectors, rebuild on
+NEXT press (never mid-hold):
+- track onended/onmute → teardown + warn (instant recovery on clean drops).
+- mediaDevices 'devicechange' → mark captureStale, rebuild next press.
+- silent-streak backstop: SILENT_STREAK_LIMIT (3) consecutive long holds with
+  worklet peak < SILENCE_PEAK (0.01) ⇒ warn + rebuild. Catches the macOS
+  live-but-silent track (no event) — the exact observed symptom. Single silent
+  hold is legitimate (held key, said nothing) so it never nags on one.
+- New visible channel: dictation:mic-warning → native Notification (throttled
+  10s) so failures are no longer silent.
+
+Reused the worklet's already-emitted `peak` (was discarded) — zero added cost.
+Guarded audioWorklet.addModule with workletLoaded (re-adding re-runs
+registerProcessor → throws on duplicate name) so rebuilds don't crash.
+
+TRADEOFF flagged: on 'devicechange' we rebuild on the next press. If a browser
+fires devicechange as a side effect of getUserMedia (can happen the first time
+labels populate), one extra rebuild occurs — harmless (~100-300ms re-acquire,
+self-limiting since the app already holds standing mic permission, so steady
+state doesn't loop). Did NOT add device-list diffing to suppress it — not worth
+the complexity for a one-off extra rebuild.
+
+Takes effect only after restarting GVoice (hidden dictation window must reload
+the new preload + dictation.js). Parity 5/5 still pass.

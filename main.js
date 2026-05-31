@@ -1,6 +1,6 @@
 // @ts-check
 import "dotenv/config";
-import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen } from "electron";
+import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification } from "electron";
 
 // Brand the app as "GVoice" even when run unpackaged (otherwise the menu bar,
 // About panel, and userData folder all read "Electron"). Must run before the
@@ -473,6 +473,35 @@ function setupIpc() {
     dictation.done();
     console.error("Dictation error:", message);
   });
+
+  // The renderer lost the microphone (disconnected, muted, seized by another
+  // app, or silent for several holds in a row) and rebuilt its capture. Make
+  // the failure visible instead of silently typing nothing.
+  ipcMain.on("dictation:mic-warning", (_event, message) => {
+    hidePill();
+    dictation.done();
+    console.error("[main] mic warning:", message);
+    showMicWarning(message);
+  });
+}
+
+let lastMicWarningAt = 0;
+
+// Surface a microphone problem to the user. Throttled so a burst of silent
+// holds can't spam the notification center.
+function showMicWarning(/** @type {string} */ message) {
+  const now = Date.now();
+  if (now - lastMicWarningAt < 10000) return;
+  lastMicWarningAt = now;
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title: "GVoice — check your microphone", body: message }).show();
+    }
+  } catch (err) {
+    console.error("[main] mic-warning notification failed:", err && err.message);
+  }
+  // Windows tray balloon as a secondary channel (no-op on macOS).
+  try { tray?.displayBalloon?.({ title: "GVoice — check your microphone", content: message }); } catch {}
 }
 
 // Show the backup pop-up for a saved recording. Recreated each failure so the

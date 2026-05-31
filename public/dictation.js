@@ -48,6 +48,30 @@ const PREROLL_MAX_BYTES = Math.round((targetSampleRate * 2 * PREROLL_MS) / 1000)
 let prerollChunks = [];
 let prerollBytes = 0;
 
+// --- Microphone auto-recovery -------------------------------------------------
+// A getUserMedia stream binds to ONE device at the instant it's acquired. If
+// that device is later unplugged, muted, switched, or grabbed by another app
+// (a call, screen-share, etc.), the track goes mute/ended but the stream object
+// stays "live" — so without watching for it we'd keep streaming pure silence
+// and typing nothing, forever, until the app is restarted. We watch three
+// signals and rebuild the pipeline (on the NEXT press, never mid-hold):
+//   1. the track's onended/onmute events (clean OS drop / seizure),
+//   2. mediaDevices 'devicechange' (default input switched/unplugged),
+//   3. a run of silent holds (the macOS case where the track stays live but
+//      pipes silence with no event at all).
+let utterancePeak = 0;        // loudest worklet frame in the current hold (0..1)
+let silentStreak = 0;         // consecutive long-enough holds that were silent
+let captureStale = false;     // device changed → rebuild the pipeline next press
+let deviceChangeWired = false;
+let workletLoaded = false;    // audioWorklet module added (guards re-registration)
+// Loudest frame below this, sustained across an entire long hold, means no real
+// audio arrived. ~1% of full scale; a live mic in a real room clears it within
+// the hold, a dead/seized device sits at ~0. Tunable for A/B testing.
+const SILENCE_PEAK = Number(window.DICTATION_SILENCE_PEAK || 0.01);
+// This many silent long-holds in a row ⇒ the mic is almost certainly dead, not
+// the user choosing silence repeatedly. Warn + rebuild on the next press.
+const SILENT_STREAK_LIMIT = 3;
+
 function log(line) {
   const ts = new Date().toLocaleTimeString();
   logEl.textContent += `[${ts}] ${line}\n`;
@@ -210,6 +234,18 @@ async function initCapture() {
   if (captureReady) return;
   audioContext = audioContext || new AudioContext();
   if (audioContext.state === "suspended") await audioContext.resume();
+
+  // Re-acquire onto the current default device whenever the audio device set
+  // changes (unplug, switch, BT connect). We don't rebuild here — that could
+  // land mid-hold — just mark the warm pipeline stale so the next press does.
+  if (!deviceChangeWired && navigator.mediaDevices?.addEventListener) {
+    deviceChangeWired = true;
+    navigator.mediaDevices.addEventListener("devicechange", () => {
+      captureStale = true;
+      log("Audio devices changed — mic re-acquires on next press");
+    });
+  }
+
   mediaStream = await navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
@@ -219,7 +255,21 @@ async function initCapture() {
     }
   });
 
-  await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+  // The stream is bound to this one device. If the OS drops it (ended) or
+  // another app seizes it (mute), tear down so the next press rebuilds, and
+  // surface a visible warning instead of silently typing nothing.
+  const [track] = mediaStream.getAudioTracks();
+  if (track) {
+    track.onended = () => handleMicLost("The microphone was disconnected.");
+    track.onmute = () => handleMicLost("The microphone went silent — another app may have taken it.");
+  }
+
+  // addModule re-runs the module script (and registerProcessor) every call;
+  // registering the same processor name twice throws. Load it exactly once.
+  if (!workletLoaded) {
+    await audioContext.audioWorklet.addModule("/audio-capture-worklet.js");
+    workletLoaded = true;
+  }
   sourceNode = audioContext.createMediaStreamSource(mediaStream);
   // Input gain is applied (soft-clipped) in the worklet so quiet/distant
   // speech crosses Deepgram's energy threshold. Override at runtime via
@@ -233,7 +283,7 @@ async function initCapture() {
   muteNode.gain.value = 0;
 
   processorNode.port.onmessage = (event) => {
-    const { pcm16 } = event.data;
+    const { pcm16, peak } = event.data;
     // Maintain the rolling pre-roll window regardless of recording state.
     prerollChunks.push(pcm16);
     prerollBytes += pcm16.byteLength;
@@ -241,6 +291,9 @@ async function initCapture() {
       prerollBytes -= prerollChunks.shift().byteLength;
     }
     if (!isRecording) return;
+    // Track the loudest frame of this hold so stopRecording can tell a dead mic
+    // (sustained ~0) from real speech.
+    if (typeof peak === "number" && peak > utterancePeak) utterancePeak = peak;
     // Keep a copy of every recorded frame for the backup. slice(0) detaches it
     // from the transferred buffer so it survives independently.
     const copy = new Uint8Array(pcm16.slice(0));
@@ -261,6 +314,44 @@ async function initCapture() {
   captureReady = true;
 }
 
+// Tear the capture graph down so the next initCapture() rebuilds onto the
+// current default device. Keeps the AudioContext + loaded worklet module
+// (both reusable); only the device-bound stream and nodes are dropped.
+function teardownCapture() {
+  try { if (processorNode) processorNode.port.onmessage = null; } catch {}
+  try { sourceNode && sourceNode.disconnect(); } catch {}
+  try { processorNode && processorNode.disconnect(); } catch {}
+  try { muteNode && muteNode.disconnect(); } catch {}
+  if (mediaStream) {
+    for (const track of mediaStream.getTracks()) { try { track.stop(); } catch {} }
+  }
+  sourceNode = null;
+  processorNode = null;
+  muteNode = null;
+  mediaStream = null;
+  prerollChunks = [];
+  prerollBytes = 0;
+  captureReady = false;
+}
+
+// The mic died or was taken (track ended/muted, or a run of silent holds).
+// Drop the dead pipeline, surface a visible warning, and reset so the next
+// press re-acquires. Safe to call mid-hold: we just abandon the current one.
+function handleMicLost(reason) {
+  log("Mic lost: " + reason);
+  isRecording = false;
+  teardownCapture();
+  silentStreak = 0;
+  clearFailureTimer();
+  setStatus("Mic lost");
+  // Don't leave the relay blocked on a commit that carries no audio.
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try { socket.close(); } catch {}
+  }
+  socket = null;
+  window.dictationBridge.sendMicWarning(reason);
+}
+
 async function startRecording(profile) {
   if (isRecording) return;
   activeProfile = profile || null;
@@ -276,6 +367,13 @@ async function startRecording(profile) {
     return;
   }
 
+  // A device change since the last press means our warm stream is bound to the
+  // wrong (old) device — drop it so initCapture re-acquires the new default.
+  if (captureStale) {
+    teardownCapture();
+    captureStale = false;
+  }
+
   try {
     await initCapture();
     // The pipeline persists across presses; the OS may have suspended the
@@ -287,6 +385,8 @@ async function startRecording(profile) {
     window.dictationBridge.sendError("Microphone not available: " + error.message);
     return;
   }
+
+  utterancePeak = 0;
 
   transcriptParts = [];
   alreadyFinalized = false;
@@ -323,6 +423,24 @@ function stopRecording() {
   isRecording = false;
   setStatus("Finalizing…");
   log("Mic stopped, committing buffer");
+
+  // Dead-mic backstop: only judge holds long enough to be a real attempt (a tap
+  // is a misfire, not a silent mic). A live mic clears SILENCE_PEAK within the
+  // hold; a sustained sub-threshold peak means no audio arrived. A single such
+  // hold is legitimate (held the key, said nothing) — but a run of them is the
+  // mic, not the user, so warn and rebuild on the next press.
+  if (recordedBytes >= MIN_FAILURE_BYTES) {
+    if (utterancePeak < SILENCE_PEAK) {
+      silentStreak += 1;
+      log("Silent hold " + silentStreak + "/" + SILENT_STREAK_LIMIT + " (peak=" + utterancePeak.toFixed(4) + ")");
+      if (silentStreak >= SILENT_STREAK_LIMIT) {
+        handleMicLost("No sound is reaching the app — your mic may be muted or in use by another app.");
+        return;
+      }
+    } else {
+      silentStreak = 0;
+    }
+  }
 
   // Leave the capture pipeline warm for the next press — only stop streaming.
 
