@@ -189,10 +189,40 @@ function showPillForWindow(/** @type {number | null} */ hwnd) {
     y = display.bounds.y + PILL_MARGIN;
   }
   pillWindow.setBounds({ x, y, width: PILL_W, height: PILL_H });
+  clearTimeout(pillSafetyTimer);
+  setPillState("listening");
   pillWindow.showInactive();
 }
 
+// Flip the pill between its "listening" (pulsing dot) and "processing"
+// (spinning ring) looks. The pill window has no preload, so we poke its DOM
+// directly. Errors (e.g. page not loaded yet) are harmless — the markup
+// defaults to "listening".
+function setPillState(/** @type {"listening" | "processing"} */ state) {
+  if (!pillWindow || pillWindow.isDestroyed()) return;
+  pillWindow.webContents
+    .executeJavaScript(
+      `document.body && document.body.setAttribute('data-state', ${JSON.stringify(state)});`
+    )
+    .catch(() => {});
+}
+
+let pillSafetyTimer = null;
+
+// Backstop: if the renderer ever fails to report back (crash, lost IPC), make
+// sure the spinner doesn't linger on screen. Normal completions clear this via
+// hidePill() well before it fires.
+function armPillSafetyHide() {
+  clearTimeout(pillSafetyTimer);
+  pillSafetyTimer = setTimeout(() => {
+    pillSafetyTimer = null;
+    hidePill();
+  }, 15000);
+}
+
 function hidePill() {
+  clearTimeout(pillSafetyTimer);
+  pillSafetyTimer = null;
   if (pillWindow && pillWindow.isVisible()) {
     pillWindow.hide();
   }
@@ -257,7 +287,12 @@ async function setupHotkey() {
       dlog("release", { source });
       console.error("[main] dictation:stop (" + source + ")");
       dictationWindow.webContents.send("dictation:stop");
-      hidePill();
+      // Keep the pill visible but switch it to a spinner so the user can see
+      // the transcription is still working. It's hidden when a terminal event
+      // (transcript / failure / error) arrives; the safety timer covers a
+      // renderer that never reports back.
+      setPillState("processing");
+      armPillSafetyHide();
     };
 
     const mod = await import("./src/hotkey.js");
@@ -344,6 +379,7 @@ async function processTranscript(transcript, restoreHwnd = null) {
   }
   await typeText(textToType);
   console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ")");
+  dlog("typed", { len: textToType.length, ms: Date.now() - tType });
   return textToType;
 }
 
@@ -351,6 +387,7 @@ function setupIpc() {
   ipcMain.on("dictation:transcript", async (_event, transcript) => {
     const { releaseAt, sinceRelease } = dictation.finalize();
     console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(transcript));
+    dlog("transcript", { len: (transcript || "").trim().length, sinceRelease });
     hidePill();
     // Empty transcript = silence, a filtered hallucination, or a misfire
     // (too-short hold). Reopen the session immediately (don't wait on the

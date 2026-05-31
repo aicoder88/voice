@@ -148,9 +148,11 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
     [
       keyCodes.AltRight,
       keyCodes.AltGraph,
-      // Raw scancode fallbacks observed in older uiohook builds.
-      3640,
-      56
+      // Raw scancode fallback for the EXTENDED right-Alt (0xE038 = 3640) seen in
+      // older uiohook builds. The bare 0x38 (= 56) is LEFT Alt/Option and is
+      // deliberately NOT listed — including it made the left Option key also
+      // fire dictation on macOS.
+      3640
     ].filter((v) => typeof v === "number")
   );
   // Right-Ctrl only. Left-Ctrl is deliberately excluded — Ctrl+C / Ctrl+V

@@ -15,8 +15,6 @@
 // false on non-Win because the only caller (the polling hotkey loop) is
 // itself Windows-only — Mac uses uiohook-napi's event-based path instead.
 
-import koffi from "koffi";
-
 const isWin = process.platform === "win32";
 
 /** @type {((hwnd: number) => number) | null} */
@@ -30,6 +28,9 @@ let GetWindowRect = null;
 
 if (isWin) {
   try {
+    // koffi is a Windows-only need here, so load it lazily — macOS/Linux
+    // never import it and stay immune to it being absent or broken.
+    const koffi = (await import("koffi")).default;
     const user32 = koffi.load("user32.dll");
     // HWND is officially a pointer, but Win32 docs (and 32/64-bit interop)
     // guarantee the value fits in 32 bits. Use intptr_t so koffi returns a

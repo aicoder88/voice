@@ -26,23 +26,48 @@
         width: max-content;
         margin: 8px;
       }
+      /* Indicator and label both swap based on body[data-state]. */
+      .dot, .spinner {
+        width: 14px;
+        height: 14px;
+        box-sizing: border-box;
+        flex: none;
+      }
       .dot {
-        width: 10px;
-        height: 10px;
         border-radius: 50%;
         background: #ff5a5a;
         animation: pulse 1s ease-in-out infinite;
       }
+      .spinner {
+        border-radius: 50%;
+        border: 2px solid rgba(255, 255, 255, 0.35);
+        border-top-color: #ffffff;
+        animation: spin 0.7s linear infinite;
+      }
+      /* Default (listening): show dot + "Listening…". Hide processing bits. */
+      .spinner,
+      .label-processing { display: none; }
+      /* Processing: show spinner + "Transcribing…", hide listening bits. */
+      body[data-state="processing"] .dot,
+      body[data-state="processing"] .label-listening { display: none; }
+      body[data-state="processing"] .spinner { display: inline-block; }
+      body[data-state="processing"] .label-processing { display: inline; }
+
       @keyframes pulse {
         0%, 100% { opacity: 1; transform: scale(1); }
         50% { opacity: 0.55; transform: scale(0.8); }
       }
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
     </style>
   </head>
-  <body>
+  <body data-state="listening">
     <div class="pill">
       <div class="dot"></div>
-      <span>Listening…</span>
+      <div class="spinner"></div>
+      <span class="label-listening">Listening…</span>
+      <span class="label-processing">Transcribing…</span>
     </div>
   </body>
 </html>

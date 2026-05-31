@@ -141,6 +141,11 @@ function handleRealtimeEvent(msg) {
     if (finalText && finalText.trim()) {
       lastFinalAt = Date.now();
       finalizeAndSend(finalText.trim());
+    } else if (!alreadyFinalized) {
+      // Terminal frame with no text (silence gate or hallucination filter).
+      // Tell main anyway so it drops the pill instead of leaving the spinner up.
+      alreadyFinalized = true;
+      window.dictationBridge.sendTranscript("");
     }
     return;
   }
