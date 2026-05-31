@@ -2,6 +2,11 @@
 import "dotenv/config";
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen } from "electron";
 
+// Brand the app as "GVoice" even when run unpackaged (otherwise the menu bar,
+// About panel, and userData folder all read "Electron"). Must run before the
+// app is ready and before any getPath("userData") call.
+app.setName("GVoice");
+
 // Single-instance lock. Without this every `npm start` would spawn an extra
 // Electron process whose global Alt hotkey listener competed with the
 // existing one — pressing right-Alt once fired N parallel dictation sessions
@@ -14,7 +19,7 @@ if (!app.requestSingleInstanceLock()) {
 app.on("second-instance", () => {
   // Headless app — there's no main window to refocus, just flash the tray
   // tooltip so the user knows the existing instance acknowledged them.
-  if (tray) tray.displayBalloon?.({ title: "Voice Dictation", content: "Already running. Hold right Alt to dictate." });
+  if (tray) tray.displayBalloon?.({ title: "GVoice", content: "Already running. Hold right Alt to dictate." });
 });
 
 process.on("uncaughtException", (err) => {
@@ -546,7 +551,7 @@ function buildAppMenu() {
             { role: "unhide" },
             { type: "separator" },
             {
-              label: "Quit Voice Dictation",
+              label: "Quit GVoice",
               accelerator: "Cmd+Q",
               click: () => { isQuitting = true; app.quit(); }
             }

@@ -1,5 +1,5 @@
 {
-  "name": "voice-realtime-websocket",
+  "name": "gvoice",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -24,8 +24,8 @@
     "electron-builder": "^26.8.1"
   },
   "build": {
-    "appId": "com.purr.voicedictation",
-    "productName": "Voice Dictation",
+    "appId": "com.purr.gvoice",
+    "productName": "GVoice",
     "files": [
       "main.js",
       "preload.cjs",

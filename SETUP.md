@@ -1,6 +1,6 @@
-# Voice Dictation - Setup
+# GVoice - Setup
 
-Wispr Flow-style push-to-talk dictation. Hold **Right Alt** anywhere on Windows, speak, release - the transcript types itself into the focused text field.
+Push-to-talk dictation. Hold **Right Alt** anywhere on Windows, speak, release - the transcript types itself into the focused text field.
 
 ## One-time setup
 
