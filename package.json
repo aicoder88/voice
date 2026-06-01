@@ -29,7 +29,7 @@
     "files": [
       "main.js",
       "preload.cjs",
-      "preload-backup.cjs",
+      "preload-pill.cjs",
       "server.js",
       "realtime-relay.js",
       "src/**/*",

@@ -12,62 +12,154 @@
         user-select: none;
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
+      /* The pill is centered in a transparent window. Every state shares this
+         shell; the dot colour, label, and (for results) the action buttons swap
+         based on body[data-state]. */
+      body {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        height: 100vh;
+      }
       .pill {
         display: flex;
         align-items: center;
         gap: 10px;
-        padding: 10px 16px;
-        background: rgba(20, 124, 114, 0.96);
+        padding: 9px 14px;
+        background: rgba(22, 26, 32, 0.97);
         color: #ffffff;
         border-radius: 999px;
-        box-shadow: 0 6px 24px rgba(0, 0, 0, 0.35);
+        box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
         font-size: 14px;
         font-weight: 650;
         width: max-content;
-        margin: 8px;
-      }
-      /* Indicator and label both swap based on body[data-state]. */
-      .dot, .spinner {
-        width: 14px;
-        height: 14px;
-        box-sizing: border-box;
-        flex: none;
+        max-width: calc(100vw - 16px);
       }
       .dot {
+        width: 13px;
+        height: 13px;
         border-radius: 50%;
-        background: #ff5a5a;
-        animation: pulse 1s ease-in-out infinite;
+        box-sizing: border-box;
+        flex: none;
+        background: #ff5a5a; /* listening default */
       }
-      .spinner {
-        border-radius: 50%;
-        border: 2px solid rgba(255, 255, 255, 0.35);
-        border-top-color: #ffffff;
-        animation: spin 0.7s linear infinite;
+      .label { white-space: nowrap; }
+
+      /* --- Per-state dot colour + animation ------------------------------- */
+      body[data-state="listening"]    .dot { background: #ff5a5a; animation: pulse 1s ease-in-out infinite; }
+      body[data-state="transcribing"] .dot { background: #4aa3ff; animation: pulse 1s ease-in-out infinite; }
+      body[data-state="success"]      .dot { background: #34d399; box-shadow: 0 0 10px rgba(52, 211, 153, 0.7); }
+      body[data-state="error"]        .dot { background: #ff5a5a; box-shadow: 0 0 10px rgba(255, 90, 90, 0.7); }
+
+      /* --- Action buttons: only on result states ------------------------- */
+      .actions { display: none; align-items: center; gap: 6px; margin-left: 4px; }
+      body[data-state="success"] .actions,
+      body[data-state="error"] .actions { display: flex; }
+      .actions button {
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        color: #e7eef5;
+        background: rgba(255, 255, 255, 0.12);
+        border: 0;
+        border-radius: 999px;
+        padding: 5px 11px;
+        cursor: pointer;
+        white-space: nowrap;
+        transition: background 0.12s ease, opacity 0.12s ease;
       }
-      /* Default (listening): show dot + "Listening…". Hide processing bits. */
-      .spinner,
-      .label-processing { display: none; }
-      /* Processing: show spinner + "Transcribing…", hide listening bits. */
-      body[data-state="processing"] .dot,
-      body[data-state="processing"] .label-listening { display: none; }
-      body[data-state="processing"] .spinner { display: inline-block; }
-      body[data-state="processing"] .label-processing { display: inline; }
+      .actions button:hover { background: rgba(255, 255, 255, 0.22); }
+      .actions button:active { background: rgba(255, 255, 255, 0.3); }
+      /* Divider between the label and the actions. Only shown when at least
+         one action button is present (toggled via .has-actions in JS). */
+      .sep {
+        display: none;
+        width: 1px;
+        height: 18px;
+        background: rgba(255, 255, 255, 0.16);
+        margin: 0 2px;
+        flex: none;
+      }
+      body.has-actions .sep { display: block; }
 
       @keyframes pulse {
         0%, 100% { opacity: 1; transform: scale(1); }
-        50% { opacity: 0.55; transform: scale(0.8); }
-      }
-      @keyframes spin {
-        to { transform: rotate(360deg); }
+        50% { opacity: 0.5; transform: scale(0.78); }
       }
     </style>
   </head>
   <body data-state="listening">
     <div class="pill">
       <div class="dot"></div>
-      <div class="spinner"></div>
-      <span class="label-listening">Listening…</span>
-      <span class="label-processing">Transcribing…</span>
+      <span class="label" id="label">Listening…</span>
+      <span class="sep"></span>
+      <div class="actions">
+        <button id="copy" type="button">Copy</button>
+        <button id="open" type="button">Open recording</button>
+      </div>
     </div>
+
+    <script>
+      const LABELS = {
+        listening: "Listening…",
+        transcribing: "Transcribing…",
+        success: "Success",
+        error: "Error"
+      };
+      const labelEl = document.getElementById("label");
+      const copyBtn = document.getElementById("copy");
+      const openBtn = document.getElementById("open");
+
+      // Auto-hide for result states, paused while the pointer is over the pill
+      // so there's time to click Copy / Open. A clean success vanishes fast
+      // (it worked, get out of the way); an error lingers so the user can act.
+      const HIDE_BY_STATE = { success: 2000, error: 8000 };
+      let currentHideMs = 8000;
+      let hideTimer = null;
+      function clearHide() { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } }
+      function armHide(ms) {
+        clearHide();
+        hideTimer = setTimeout(() => window.pillBridge.hide(), ms);
+      }
+
+      function applyState(data) {
+        const state = (data && data.state) || "listening";
+        document.body.setAttribute("data-state", state);
+        labelEl.textContent = LABELS[state] || state;
+
+        const isResult = state === "success" || state === "error";
+        const showCopy = isResult && data && data.canCopy;
+        const showOpen = isResult && data && data.canOpen;
+        copyBtn.style.display = showCopy ? "" : "none";
+        openBtn.style.display = showOpen ? "" : "none";
+        copyBtn.textContent = "Copy";
+        document.body.classList.toggle("has-actions", !!(showCopy || showOpen));
+
+        currentHideMs = HIDE_BY_STATE[state] ?? 8000;
+        clearHide();
+        if (isResult) armHide(currentHideMs);
+      }
+
+      copyBtn.addEventListener("click", () => {
+        window.pillBridge.copy();
+        copyBtn.textContent = "Copied ✓";
+        // Hold the pill a touch longer so the confirmation registers.
+        armHide(1400);
+      });
+      openBtn.addEventListener("click", () => {
+        window.pillBridge.openRecording();
+        armHide(1400);
+      });
+
+      // Keep the pill alive while the user is reaching for a button; on leave,
+      // re-arm with the state's own timeout (2s success / 8s error).
+      document.body.addEventListener("mouseenter", clearHide);
+      document.body.addEventListener("mouseleave", () => {
+        const s = document.body.getAttribute("data-state");
+        if (s === "success" || s === "error") armHide(currentHideMs);
+      });
+
+      window.pillBridge.onState(applyState);
+    </script>
   </body>
 </html>

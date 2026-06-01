@@ -45,6 +45,125 @@ if (isWin) {
   }
 }
 
+const isMac = process.platform === "darwin";
+
+// --- macOS: is an editable field actually focused? ----------------------------
+// We paste with ⌘V, which silently goes nowhere if the user didn't click into a
+// text field. There's no way to confirm a paste landed, but we CAN ask the
+// Accessibility API what UI element has focus and whether it's editable — and
+// classify the dictation as success vs error accordingly. Uses GVoice's own
+// Accessibility permission (already granted for typing), so no extra prompt.
+const kCFStringEncodingUTF8 = 0x08000100;
+const AX_EDITABLE_ROLES = new Set([
+  "AXTextField",
+  "AXTextArea",
+  "AXComboBox",
+  "AXSearchField",
+  "AXSecureTextField"
+]);
+
+/** @type {(() => unknown) | null} */
+let AXUIElementCreateSystemWide = null;
+/** @type {((el: unknown, attr: unknown, out: unknown[]) => number) | null} */
+let AXUIElementCopyAttributeValue = null;
+/** @type {((el: unknown, attr: unknown, out: boolean[]) => number) | null} */
+let AXUIElementIsAttributeSettable = null;
+/** @type {(() => boolean) | null} */
+let AXIsProcessTrusted = null;
+/** @type {((cf: unknown) => void) | null} */
+let CFRelease = null;
+/** @type {((str: unknown, buf: Buffer, size: number, enc: number) => boolean) | null} */
+let CFStringGetCString = null;
+/** @type {unknown} */ let kAXFocusedUIElement = null;
+/** @type {unknown} */ let kAXRole = null;
+/** @type {unknown} */ let kAXValue = null;
+
+if (isMac) {
+  try {
+    const koffi = (await import("koffi")).default;
+    const CF = koffi.load("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation");
+    const AX = koffi.load("/System/Library/Frameworks/ApplicationServices.framework/ApplicationServices");
+
+    const CFStringCreateWithCString = CF.func(
+      "void *CFStringCreateWithCString(void *alloc, const char *cStr, uint32_t encoding)"
+    );
+    CFStringGetCString = CF.func(
+      "bool CFStringGetCString(void *theString, _Out_ char *buffer, long bufferSize, uint32_t encoding)"
+    );
+    CFRelease = CF.func("void CFRelease(void *cf)");
+
+    AXUIElementCreateSystemWide = AX.func("void *AXUIElementCreateSystemWide(void)");
+    AXUIElementCopyAttributeValue = AX.func(
+      "int AXUIElementCopyAttributeValue(void *element, void *attribute, _Out_ void **value)"
+    );
+    AXUIElementIsAttributeSettable = AX.func(
+      "int AXUIElementIsAttributeSettable(void *element, void *attribute, _Out_ bool *settable)"
+    );
+    AXIsProcessTrusted = AX.func("bool AXIsProcessTrusted(void)");
+
+    // Attribute name constants — created once, intentionally never released.
+    kAXFocusedUIElement = CFStringCreateWithCString(null, "AXFocusedUIElement", kCFStringEncodingUTF8);
+    kAXRole = CFStringCreateWithCString(null, "AXRole", kCFStringEncodingUTF8);
+    kAXValue = CFStringCreateWithCString(null, "AXValue", kCFStringEncodingUTF8);
+  } catch (err) {
+    console.error("[foreground] AX init failed:", err && err.message);
+    AXUIElementCreateSystemWide = null;
+  }
+}
+
+/**
+ * Is the currently-focused element something the user can type into?
+ *
+ * @returns {boolean | null}  true = editable field focused, false = nothing
+ *   editable focused (a paste would go nowhere), null = couldn't tell (AX
+ *   unavailable / not trusted) — caller should not treat this as a failure.
+ */
+export function isEditableFieldFocused() {
+  if (!isMac || !AXUIElementCreateSystemWide || !AXUIElementCopyAttributeValue) return null;
+  try {
+    if (AXIsProcessTrusted && !AXIsProcessTrusted()) return null; // permission missing
+    const systemWide = AXUIElementCreateSystemWide();
+    if (!systemWide) return null;
+    try {
+      const focusedOut = [null];
+      // kAXErrorSuccess === 0. Anything else (incl. no focused element) ⇒ no
+      // editable target.
+      if (AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElement, focusedOut) !== 0) return false;
+      const focused = focusedOut[0];
+      if (!focused) return false;
+      try {
+        let editable = false;
+        // 1) Role check covers native + browser/Electron text inputs.
+        const roleOut = [null];
+        if (AXUIElementCopyAttributeValue(focused, kAXRole, roleOut) === 0 && roleOut[0]) {
+          const buf = Buffer.alloc(128);
+          if (CFStringGetCString(roleOut[0], buf, buf.length, kCFStringEncodingUTF8)) {
+            const end = buf.indexOf(0); const role = buf.toString("utf8", 0, end < 0 ? buf.length : end);
+            editable = AX_EDITABLE_ROLES.has(role);
+          }
+          CFRelease(roleOut[0]);
+        }
+        // 2) Fallback: anything whose value is writable (custom editors that
+        //    report an unusual role) still counts as editable.
+        if (!editable && AXUIElementIsAttributeSettable) {
+          const settableOut = [false];
+          if (AXUIElementIsAttributeSettable(focused, kAXValue, settableOut) === 0) {
+            editable = settableOut[0] === true;
+          }
+        }
+        return editable;
+      } finally {
+        CFRelease(focused);
+      }
+    } finally {
+      CFRelease(systemWide);
+    }
+  } catch (err) {
+    console.error("[foreground] focus check failed:", err && err.message);
+    return null;
+  }
+}
+
 /**
  * Snapshot of the foreground window at hotkey press time. Pass back to
  * restoreForegroundWindow() before pasting.

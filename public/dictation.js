@@ -75,6 +75,11 @@ const SILENT_STREAK_LIMIT = 3;
 function log(line) {
   const ts = new Date().toLocaleTimeString();
   logEl.textContent += `[${ts}] ${line}\n`;
+  // This hidden window runs for the whole session; cap the log so its DOM text
+  // can't grow without bound. Keep roughly the last ~150 lines.
+  if (logEl.textContent.length > 16000) {
+    logEl.textContent = logEl.textContent.slice(-12000);
+  }
   console.log(line);
 }
 
@@ -215,9 +220,14 @@ function finalizeAndSend(text) {
   alreadyFinalized = true;
   clearFailureTimer();
   log("Final: " + text);
-  window.dictationBridge.sendTranscript(text);
+  // Ship the captured audio with the transcript so main can save it to the
+  // temporary recordings folder — the success pill's "Open recording" button
+  // needs a file even when transcription succeeded.
+  const chunks = recordedChunks.map((u8) => u8ToBase64(u8));
+  window.dictationBridge.sendTranscript({ text, chunks, sampleRate: targetSampleRate });
   transcriptParts = [];
-  // Success — drop the backup audio so memory doesn't grow press over press.
+  // Drop the in-memory copy now that it's handed off, so memory doesn't grow
+  // press over press.
   recordedChunks = [];
   recordedBytes = 0;
 }

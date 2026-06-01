@@ -1,6 +1,6 @@
 // @ts-check
 import "dotenv/config";
-import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification } from "electron";
+import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification, clipboard } from "electron";
 
 // Brand the app as "GVoice" even when run unpackaged (otherwise the menu bar,
 // About panel, and userData folder all read "Electron"). Must run before the
@@ -33,9 +33,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
-import { saveBackup, readBackupPcm, deleteBackup, retranscribe, pruneBackups } from "./src/backup.js";
-import { captureForegroundWindow, restoreForegroundWindow, getWindowRect } from "./src/foreground.js";
+import { wrapWav } from "./src/providers/_shared.js";
+import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused } from "./src/foreground.js";
 import { appendFileSync, statSync, renameSync, unlinkSync, existsSync } from "node:fs";
+import { writeFile as writeFileAsync, readdir, unlink as unlinkAsync, rm as rmAsync, mkdir as mkdirAsync } from "node:fs/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
@@ -44,10 +45,15 @@ const envPath = join(__dirname, ".env");
 let pillWindow = null;
 /** @type {import("electron").BrowserWindow | null} */
 let dictationWindow = null;
-/** @type {import("electron").BrowserWindow | null} */
-let backupWindow = null;
 /** @type {string | null} */
 let recordingsDir = null;
+// The transcript + recording shown on the current result pill, so the pill's
+// Copy / Open-recording buttons act on the right data. Set when a result pill
+// is shown, cleared when it hides.
+/** @type {string | null} */
+let currentTranscript = null;
+/** @type {string | null} */
+let currentRecordingPath = null;
 /** @type {import("electron").Tray | null} */
 let tray = null;
 /** @type {number | null} */
@@ -143,11 +149,14 @@ async function bootRelayServer() {
 
 function createPillWindow() {
   pillWindow = new BrowserWindow({
-    width: 180,
+    width: 200,
     height: 56,
     frame: false,
     transparent: true,
-    resizable: false,
+    // Must stay resizable: a non-resizable window ignores setBounds() size
+    // changes on macOS, which would pin the pill at its launch width and clip
+    // the wider success/error states.
+    resizable: true,
     movable: false,
     skipTaskbar: true,
     alwaysOnTop: true,
@@ -157,10 +166,17 @@ function createPillWindow() {
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      preload: join(__dirname, "preload-pill.cjs")
     }
   });
   pillWindow.setAlwaysOnTop(true, "screen-saver");
+  // This is an accessory app (Dock hidden). Without this, the always-on-top
+  // pill won't appear over full-screen apps or on other Spaces. skipTransform
+  // keeps the app from flipping to a regular Dock app when we call this.
+  pillWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  // Click-through by default. Flipped on only for the success/error states so
+  // the Copy / Open-recording buttons are clickable (see setPillState).
   pillWindow.setIgnoreMouseEvents(true);
 
   if (serverPort) {
@@ -170,66 +186,105 @@ function createPillWindow() {
   }
 }
 
-const PILL_W = 180;
-const PILL_H = 56;
-const PILL_MARGIN = 12;
+// The pill is a transparent window with the rounded pill centered inside it.
+// The window is sized per state: small for listening/transcribing, wider for
+// the success/error states that carry Copy / Open-recording buttons. It sits
+// at the bottom-middle of whichever screen the user is working on.
+const PILL_BOTTOM_MARGIN = 28; // gap above the dock / taskbar
+const PILL_SIZES = {
+  listening: { width: 200, height: 56 },
+  transcribing: { width: 220, height: 56 },
+  success: { width: 440, height: 56 },
+  error: { width: 440, height: 56 }
+};
 
-// Place the pill near the top-right corner of the window the user was typing
-// into when the hotkey fired (so it appears AT the work surface, not wherever
-// the cursor happened to be). Falls back to the top-right of the cursor's
-// display if the foreground window has no usable rectangle (some PWA/UWP
-// windows return zero or off-screen bounds).
-function showPillForWindow(/** @type {number | null} */ hwnd) {
-  if (!pillWindow) return;
-  const rect = hwnd ? getWindowRect(hwnd) : null;
-  let x;
-  let y;
+// Pick the display the pill should appear on: the one holding the window the
+// user was dictating into (Windows, where we have its rect), else the display
+// under the cursor (macOS, where getWindowRect is a stub).
+function pillDisplay() {
+  const rect = savedForegroundHwnd ? getWindowRect(savedForegroundHwnd) : null;
   if (rect && rect.right > rect.left && rect.bottom > rect.top) {
-    x = rect.right - PILL_W - PILL_MARGIN;
-    y = rect.top + PILL_MARGIN;
-  } else {
-    const cursor = screen.getCursorScreenPoint();
-    const display = screen.getDisplayNearestPoint(cursor);
-    x = display.bounds.x + display.bounds.width - PILL_W - PILL_MARGIN;
-    y = display.bounds.y + PILL_MARGIN;
+    const cx = Math.round((rect.left + rect.right) / 2);
+    const cy = Math.round((rect.top + rect.bottom) / 2);
+    return screen.getDisplayNearestPoint({ x: cx, y: cy });
   }
-  pillWindow.setBounds({ x, y, width: PILL_W, height: PILL_H });
+  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+}
+
+// Center the pill window horizontally and sit it just above the bottom of the
+// work area (which already excludes the dock / menu bar / taskbar).
+function positionPill(/** @type {number} */ width, /** @type {number} */ height) {
+  if (!pillWindow) return;
+  const wa = pillDisplay().workArea;
+  const x = Math.round(wa.x + (wa.width - width) / 2);
+  const y = Math.round(wa.y + wa.height - height - PILL_BOTTOM_MARGIN);
+  pillWindow.setBounds({ x, y, width, height });
+}
+
+function showPillForWindow(/** @type {number | null} */ _hwnd) {
+  if (!pillWindow) return;
   clearTimeout(pillSafetyTimer);
   setPillState("listening");
   pillWindow.showInactive();
 }
 
-// Flip the pill between its "listening" (pulsing dot) and "processing"
-// (spinning ring) looks. The pill window has no preload, so we poke its DOM
-// directly. Errors (e.g. page not loaded yet) are harmless — the markup
-// defaults to "listening".
-function setPillState(/** @type {"listening" | "processing"} */ state) {
+// Drive the pill's look + behaviour. listening/transcribing are passive and
+// click-through; success/error carry action buttons, so mouse events are
+// enabled and the renderer owns the auto-hide (with hover-pause). `opts` only
+// applies to result states: { canCopy, canOpen }.
+function setPillState(
+  /** @type {"listening" | "transcribing" | "success" | "error"} */ state,
+  /** @type {{ canCopy?: boolean, canOpen?: boolean }} */ opts = {}
+) {
   if (!pillWindow || pillWindow.isDestroyed()) return;
-  pillWindow.webContents
-    .executeJavaScript(
-      `document.body && document.body.setAttribute('data-state', ${JSON.stringify(state)});`
-    )
-    .catch(() => {});
+  const size = PILL_SIZES[state] || PILL_SIZES.listening;
+  positionPill(size.width, size.height);
+  const interactive = state === "success" || state === "error";
+  pillWindow.setIgnoreMouseEvents(!interactive);
+  pillWindow.webContents.send("pill:state", {
+    state,
+    canCopy: !!opts.canCopy,
+    canOpen: !!opts.canOpen
+  });
+}
+
+// Show a terminal result pill (success or error) and remember what its buttons
+// act on. The renderer auto-hides it; the safety timer is a longer backstop in
+// case the renderer's own timer is lost.
+function showPillResult(
+  /** @type {"success" | "error"} */ state,
+  /** @type {string | null} */ transcript,
+  /** @type {string | null} */ recordingPath
+) {
+  currentTranscript = transcript;
+  currentRecordingPath = recordingPath;
+  setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath });
+  pillWindow?.showInactive();
+  armPillSafetyHide(12000);
 }
 
 let pillSafetyTimer = null;
 
 // Backstop: if the renderer ever fails to report back (crash, lost IPC), make
-// sure the spinner doesn't linger on screen. Normal completions clear this via
+// sure the pill doesn't linger on screen. Normal completions clear this via
 // hidePill() well before it fires.
-function armPillSafetyHide() {
+function armPillSafetyHide(/** @type {number} */ ms = 15000) {
   clearTimeout(pillSafetyTimer);
   pillSafetyTimer = setTimeout(() => {
     pillSafetyTimer = null;
     hidePill();
-  }, 15000);
+  }, ms);
 }
 
 function hidePill() {
   clearTimeout(pillSafetyTimer);
   pillSafetyTimer = null;
-  if (pillWindow && pillWindow.isVisible()) {
-    pillWindow.hide();
+  currentTranscript = null;
+  currentRecordingPath = null;
+  if (pillWindow && !pillWindow.isDestroyed()) {
+    // Restore click-through so a hidden result pill can't swallow clicks.
+    pillWindow.setIgnoreMouseEvents(true);
+    if (pillWindow.isVisible()) pillWindow.hide();
   }
 }
 
@@ -292,11 +347,11 @@ async function setupHotkey() {
       dlog("release", { source });
       console.error("[main] dictation:stop (" + source + ")");
       dictationWindow.webContents.send("dictation:stop");
-      // Keep the pill visible but switch it to a spinner so the user can see
-      // the transcription is still working. It's hidden when a terminal event
-      // (transcript / failure / error) arrives; the safety timer covers a
-      // renderer that never reports back.
-      setPillState("processing");
+      // Keep the pill visible but switch it to the pulsing-blue "Transcribing…"
+      // state so the user can see work is still happening. A terminal event
+      // (transcript / failure / error) flips it to success/error; the safety
+      // timer covers a renderer that never reports back.
+      setPillState("transcribing");
       armPillSafetyHide();
     };
 
@@ -339,7 +394,7 @@ async function setupHotkey() {
 //
 // @param {string} transcript
 // @param {number | null} [restoreHwnd]
-// @returns {Promise<string | null>}
+// @returns {Promise<{ text: string, pasted: boolean } | null>}
 async function processTranscript(transcript, restoreHwnd = null) {
   if (!transcript || !transcript.trim()) return null;
   let textToType = stripWhisperNoiseTokens(transcript.trim());
@@ -375,6 +430,12 @@ async function processTranscript(transcript, restoreHwnd = null) {
     textToType += ".";
   }
 
+  // Check whether an editable field is actually focused BEFORE we paste, while
+  // the user's app is still frontmost. On macOS this reads the Accessibility
+  // API (true/false); on Windows it returns null (we fall back to the restore
+  // signal). null = couldn't tell, so don't hold it against the paste.
+  const fieldFocused = isEditableFieldFocused();
+
   const tType = Date.now();
   const { typeText } = await import("./src/typing.js");
   let restored = false;
@@ -382,97 +443,139 @@ async function processTranscript(transcript, restoreHwnd = null) {
     restored = restoreForegroundWindow(restoreHwnd);
     dlog("paste", { hwnd: restoreHwnd, restored });
   }
-  await typeText(textToType);
-  console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ")");
-  dlog("typed", { len: textToType.length, ms: Date.now() - tType });
-  return textToType;
+  // Best-effort confidence that the text actually landed in a text field.
+  // Clipboard paste is fire-and-forget, so we can't truly confirm — but these
+  // signals tell us it did NOT: typeText threw; (Windows) we had a foreground
+  // window to restore and the restore failed; or (macOS) no editable element
+  // was focused, so ⌘V went nowhere.
+  let typed = true;
+  try {
+    await typeText(textToType);
+  } catch (error) {
+    typed = false;
+    console.error("[main] typeText failed:", error && (error.stack || error.message));
+  }
+  const pasted =
+    typed &&
+    !(restoreHwnd != null && restored === false) &&
+    fieldFocused !== false;
+  console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ", fieldFocused=" + fieldFocused + ", pasted=" + pasted + ")");
+  dlog("typed", { len: textToType.length, ms: Date.now() - tType, fieldFocused, pasted });
+  return { text: textToType, pasted };
+}
+
+// Write the just-captured audio to the temporary recordings folder so the
+// pill's "Open recording" button has a file to open. Only the most recent clip
+// is kept (the previous one is deleted), and the whole folder is wiped at boot
+// — these are throwaway, "open it before you restart" recordings, not the
+// long-lived backups the old failure pop-up kept. Returns the path, or null.
+//
+// @param {string[]} chunks   base64 PCM16 frames
+// @param {number} [sampleRate]
+// @returns {Promise<string | null>}
+async function saveTempRecording(chunks, sampleRate) {
+  if (!recordingsDir || !chunks || !chunks.length) return null;
+  try {
+    const pcm = Buffer.concat(chunks.map((b64) => Buffer.from(b64, "base64")));
+    if (!pcm.length) return null;
+    // Keep only the latest clip — drop any earlier ones from this session.
+    const existing = await readdir(recordingsDir).catch(() => []);
+    await Promise.all(
+      existing
+        .filter((n) => n.endsWith(".wav"))
+        .map((n) => unlinkAsync(join(recordingsDir, n)).catch(() => {}))
+    );
+    const name = `dictation-${Date.now()}.wav`;
+    const path = join(recordingsDir, name);
+    await writeFileAsync(path, wrapWav(pcm, sampleRate || 24000));
+    dlog("temp-recording", { name, bytes: pcm.length });
+    return path;
+  } catch (error) {
+    console.error("[main] Failed to save temp recording:", error && (error.stack || error.message));
+    return null;
+  }
 }
 
 function setupIpc() {
-  ipcMain.on("dictation:transcript", async (_event, transcript) => {
+  ipcMain.on("dictation:transcript", async (_event, payload) => {
+    // payload is { text, chunks, sampleRate } on a real transcript, or "" on a
+    // server-decided empty (silence gate / hallucination filter).
+    const text = typeof payload === "string" ? payload : (payload && payload.text) || "";
+    const chunks = (payload && typeof payload === "object" && payload.chunks) || null;
+    const sampleRate = (payload && typeof payload === "object" && payload.sampleRate) || undefined;
     const { releaseAt, sinceRelease } = dictation.finalize();
-    console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(transcript));
-    dlog("transcript", { len: (transcript || "").trim().length, sinceRelease });
-    hidePill();
+    console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(text));
+    dlog("transcript", { len: (text || "").trim().length, sinceRelease });
+
     // Empty transcript = silence, a filtered hallucination, or a misfire
-    // (too-short hold). Reopen the session immediately (don't wait on the
-    // safety timer) so the next press works right away — empties are common by
-    // design (silence gate + hallucination filter).
-    if (!transcript || !transcript.trim()) {
+    // (too-short hold). Just hide the pill quietly — surfacing "Error" on every
+    // accidental tap would be noise. Reopen the session immediately so the next
+    // press works right away.
+    if (!text || !text.trim()) {
+      hidePill();
       dictation.done();
       return;
     }
 
+    // Save the audio first so "Open recording" works even on a clean success.
+    const recordingPath = await saveTempRecording(chunks, sampleRate);
     try {
       // Restore focus to whichever app the user was dictating into, then type.
       // processTranscript strips Whisper noise tokens, runs the cleanup pass,
       // and pastes — restoring focus right before the paste lands.
-      const typed = await processTranscript(transcript, savedForegroundHwnd);
+      const result = await processTranscript(text, savedForegroundHwnd);
       savedForegroundHwnd = null;
-      if (!typed) console.error("[main] transcript was noise-only, dropped");
       console.error("[main] total since release: " + (Date.now() - releaseAt) + "ms");
+      if (!result || !result.text) {
+        // Noise-only after cleanup — nothing landed. Quiet hide.
+        console.error("[main] transcript was noise-only, dropped");
+        hidePill();
+      } else {
+        // Success only when we're confident the text was pasted somewhere;
+        // otherwise show Error so the user can Copy it / open the recording.
+        showPillResult(result.pasted ? "success" : "error", result.text, recordingPath);
+      }
     } catch (error) {
       console.error("[main] Typing failed:", error.stack || error.message);
+      showPillResult("error", text, recordingPath);
     } finally {
       dictation.done();
     }
   });
 
-  // A dictation couldn't be transcribed but audio was captured. Save it and
-  // open the pop-up offering Retry / Play so the recording is never lost.
+  // A dictation couldn't be transcribed but audio was captured. Save the clip
+  // and show the Error pill so the user can open the recording and try again.
   ipcMain.on("dictation:failure", async (_event, payload) => {
     dictation.finalize();
-    hidePill();
     dictation.done();
-    try {
-      const chunks = (payload && payload.chunks) || [];
-      const pcm = Buffer.concat(chunks.map((b64) => Buffer.from(b64, "base64")));
-      const { name } = await saveBackup({
-        dir: recordingsDir,
-        pcm,
-        timestamp: Date.now(),
-        sampleRate: payload && payload.sampleRate
-      });
-      console.error("[main] dictation backup saved:", name, "(" + pcm.length + " bytes)");
-      openBackupWindow(name, (payload && payload.reason) || "Transcription failed.");
-    } catch (error) {
-      console.error("[main] Failed to save dictation backup:", error.stack || error.message);
-    }
-  });
-
-  // Retry: re-transcribe a saved recording through the relay. On success, type
-  // it in and delete the backup. Returns a result the pop-up shows the user.
-  ipcMain.handle("backup:retry", async (_event, name) => {
-    if (!recordingsDir || !name) return { ok: false, reason: "Recording not found." };
-    if (!serverPort) return { ok: false, reason: "The transcriber isn't running." };
-    const path = join(recordingsDir, name);
-    try {
-      const pcm = await readBackupPcm(path);
-      const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
-      const transcript = await retranscribe(pcm, { host: `127.0.0.1:${serverPort}`, provider });
-      if (!transcript || !transcript.trim()) {
-        return { ok: false, reason: "Still couldn't make out any speech. Try playing it back." };
-      }
-      const typed = await processTranscript(transcript);
-      if (!typed) return { ok: false, reason: "Nothing to type after cleanup." };
-      await deleteBackup(path);
-      console.error("[main] backup retry succeeded, deleted:", name);
-      return { ok: true, transcript: typed };
-    } catch (error) {
-      console.error("[main] backup retry failed:", error.message);
-      return { ok: false, reason: error.message || "Retry failed." };
-    }
-  });
-
-  ipcMain.on("backup:close", () => {
-    if (backupWindow && !backupWindow.isDestroyed()) backupWindow.hide();
+    const chunks = (payload && payload.chunks) || [];
+    const recordingPath = await saveTempRecording(chunks, payload && payload.sampleRate);
+    if (recordingPath) console.error("[main] dictation recording saved:", recordingPath);
+    // No transcript to copy; the recording is what we offer.
+    showPillResult("error", null, recordingPath);
   });
 
   ipcMain.on("dictation:error", (_event, message) => {
-    hidePill();
     dictation.done();
     console.error("Dictation error:", message);
+    // No audio, no transcript — a bare Error pill (e.g. mic blocked, relay down).
+    showPillResult("error", null, null);
   });
+
+  // Pill action buttons (success/error states only).
+  ipcMain.on("pill:copy", () => {
+    if (currentTranscript) {
+      clipboard.writeText(currentTranscript);
+      dlog("pill-copy", { len: currentTranscript.length });
+    }
+  });
+  ipcMain.on("pill:open", () => {
+    if (currentRecordingPath) {
+      shell.openPath(currentRecordingPath).catch(() => {});
+      dlog("pill-open", { path: currentRecordingPath });
+    }
+  });
+  ipcMain.on("pill:hide", () => hidePill());
 
   // The renderer lost the microphone (disconnected, muted, seized by another
   // app, or silent for several holds in a row) and rebuilt its capture. Make
@@ -502,36 +605,6 @@ function showMicWarning(/** @type {string} */ message) {
   }
   // Windows tray balloon as a secondary channel (no-op on macOS).
   try { tray?.displayBalloon?.({ title: "GVoice — check your microphone", content: message }); } catch {}
-}
-
-// Show the backup pop-up for a saved recording. Recreated each failure so the
-// query params (file + reason) are fresh; a prior window is replaced.
-function openBackupWindow(name, reason) {
-  if (!serverPort) return;
-  if (backupWindow && !backupWindow.isDestroyed()) {
-    backupWindow.destroy();
-    backupWindow = null;
-  }
-  backupWindow = new BrowserWindow({
-    width: 440,
-    height: 320,
-    resizable: false,
-    minimizable: false,
-    maximizable: false,
-    fullscreenable: false,
-    title: "Dictation saved",
-    backgroundColor: "#101820",
-    alwaysOnTop: true,
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      preload: join(__dirname, "preload-backup.cjs")
-    }
-  });
-  const q = `file=${encodeURIComponent(name)}&msg=${encodeURIComponent(reason)}`;
-  backupWindow.loadURL(`http://localhost:${serverPort}/backup-error.html?${q}`);
-  backupWindow.on("closed", () => { backupWindow = null; });
 }
 
 function createTray() {
@@ -601,13 +674,13 @@ app.whenReady().then(async () => {
   if (process.platform === "darwin") {
     app.dock?.hide();
   }
-  recordingsDir = join(app.getPath("userData"), "recordings");
-  // Clear out recordings older than a week so dismissed/played-back backups
-  // don't accumulate. Successful retries already delete their own file.
-  const BACKUP_RETENTION_MS = Number(process.env.BACKUP_RETENTION_DAYS || 7) * 24 * 60 * 60 * 1000;
-  pruneBackups(recordingsDir, BACKUP_RETENTION_MS, Date.now())
-    .then((n) => { if (n) console.error("[main] pruned " + n + " old dictation backup(s)"); })
-    .catch(() => {});
+  // Temporary recordings live here. They're throwaway — the pill's "Open
+  // recording" button opens the latest clip, and the whole folder is wiped at
+  // every boot ("erased on restart"). Recreated empty so the first dictation
+  // has somewhere to write.
+  recordingsDir = join(app.getPath("userData"), "temp-recordings");
+  await rmAsync(recordingsDir, { recursive: true, force: true }).catch(() => {});
+  await mkdirAsync(recordingsDir, { recursive: true }).catch(() => {});
   await bootRelayServer();
   buildAppMenu();
   createTray();
