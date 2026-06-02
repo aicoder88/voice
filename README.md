@@ -1,114 +1,72 @@
-# Realtime Voice Agents
+# GVoice
 
-This project creates a small local voice app for the OpenAI Realtime API.
+Push-to-talk dictation for your whole computer. Hold a key, speak, release — the words type themselves into whatever text field you're in: Slack, your editor, a browser box, anything.
 
-Think of it like a front desk: your browser talks to the local server, and the local server talks to OpenAI while keeping your API key out of the browser.
+GVoice is a small menu-bar/tray app built on Electron. Your speech goes to a speech-to-text engine of your choice, an optional cleanup pass tidies up the punctuation and filler, and the result is pasted into the focused app. Your API keys stay on a local relay, never in a browser.
 
-## Setup
-
-1. Install dependencies:
-
-   ```bash
-   npm install
-   ```
-
-2. Create a `.env` file:
-
-   ```bash
-   cp .env.example .env
-   ```
-
-3. Put your OpenAI API key in `.env`.
-
-4. Start the app:
-
-   ```bash
-   npm run dev
-   ```
-
-5. Open the URL printed in the terminal.
-
-6. Pick an agent, connect, and hold the talk button while speaking.
-
-## What is included
-
-- `server.js` runs the demo web server.
-- `realtime-relay.js` is the reusable server-side relay for other apps.
-- `public/realtime-voice-agent.js` is the reusable browser widget.
-- `public/index.html` gives you a simple voice-agent demo page.
-- `.env.example` shows the settings you need.
-
-The browser connects to:
-
-```text
-ws://localhost:3000/realtime
-```
-
-The server connects to OpenAI:
-
-```text
-wss://api.openai.com/v1/realtime?model=gpt-realtime-2
-```
-
-## Use this in another app
-
-There are two parts, like a phone and a private switchboard:
-
-- The browser widget is the phone. You can put it on any page.
-- The relay is the switchboard. It stays on your server so your OpenAI key is never shown in the browser.
-
-### 1. Add the relay to your app server
-
-Install the WebSocket dependency in the other app if it does not already have it:
+## Quick start
 
 ```bash
-npm install ws
+pnpm install
+cp .env.example .env   # then add your API key(s)
+pnpm start
 ```
 
-Then attach the relay to that app's HTTP server:
+The app lives in the menu bar (macOS) or system tray (Windows). Hold **right Option** (macOS) or **right Alt** (Windows), speak, and release. Tap **right Ctrl** to flip the language. Full setup — including the local, no-API-cost Whisper option — is in [SETUP.md](SETUP.md).
 
-```js
-import { createServer } from "node:http";
-import { attachRealtimeRelay } from "./realtime-relay.js";
+## Speech engines
 
-const server = createServer(app);
+Pick one with `STT_PROVIDER` in `.env`:
 
-attachRealtimeRelay(server, {
-  path: "/realtime",
-  model: process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2"
-});
+- **`deepgram`** — fast cloud transcription (needs `DEEPGRAM_API_KEY`).
+- **`whisper-local`** — runs entirely on your machine, no per-clip cost (needs whisper.cpp binaries + a model; see SETUP.md).
+- **`openai`** — OpenAI's realtime transcription (needs `OPENAI_API_KEY`).
 
-server.listen(3000);
+## Custom dictionary
+
+GVoice keeps a list of names and made-up words it should spell exactly, and biases every engine toward them (Whisper's prompt, Deepgram's keyterm boosting, OpenAI's transcription prompt) — so they come out right instead of being guessed at.
+
+Two ways to fill it:
+
+- **Add them yourself.** Tray menu → **Manage dictionary…** opens a window where you type in your brands, people, and coined terms. This is the reliable way to fix words the engine mishears — a made-up word gets transcribed as something *else*, so you have to seed the correct spelling before the engine can produce it.
+- **Let it suggest.** After a dictation, if GVoice spots an unusual name it typed — or notices you hand-fixing a word it got wrong — a small pop-up appears next to your cursor offering to remember it. You're asked once per word; "No thanks" is remembered for good.
+
+## How it works
+
+```
+Right Option/Alt held
+        │
+        ▼
+   main.js (Electron)  ──IPC──▶  dictation window (hidden)
+        │ shows pill                    │ opens mic, streams audio
+        │                               ▼
+        │            ws://localhost:<port>/realtime  ──▶  relay  ──▶  speech engine
+        │                               │
+        │                       transcript comes back
+        ▼                               │
+Right Option/Alt released ──────────────┘
+        │
+        ▼
+   cleanup pass (optional LLM polish)  ──▶  paste into the focused app
+        │
+        ▼
+   "Add to dictionary?" pop-up if a new name showed up
 ```
 
-Keep `OPENAI_API_KEY` in the server's `.env` file.
+## Layout
 
-### 2. Add the widget to a page
+- `main.js` — Electron main process: hotkey, tray, the floating pill, typing, and the dictionary pop-up.
+- `server.js` + `realtime-relay.js` — local HTTP server and the WebSocket relay that keeps your API keys out of the browser window.
+- `src/providers/` — one transport per speech engine (`deepgram`, `whisper-local`, `openai`).
+- `src/vocab.js` — the custom dictionary: one store, read by every engine, written by the pop-up.
+- `src/correction-watch.js` — watches for a hand-typed fix right after a dictation (macOS/Linux).
+- `src/hotkey.js`, `src/typing.js`, `src/cleanup.js` — the hotkey listener, clipboard/keystroke output, and the LLM cleanup pass.
+- `public/` — the hidden mic window, the status pill, and the dictionary pop-up.
 
-Copy `public/realtime-voice-agent.js` into the other app's public/static folder. Then add:
+## Settings
 
-```html
-<script type="module" src="/realtime-voice-agent.js"></script>
+All configuration is environment variables in `.env`. The full table — engines, models, ports, cleanup, and the dictionary watch window — lives in [SETUP.md](SETUP.md).
 
-<realtime-voice-agent></realtime-voice-agent>
-```
+## Troubleshooting & logs
 
-If the relay is on a different URL, point the widget at it:
-
-```html
-<realtime-voice-agent endpoint="ws://localhost:3000/realtime"></realtime-voice-agent>
-```
-
-For a smaller version:
-
-```html
-<realtime-voice-agent compact></realtime-voice-agent>
-```
-
-To start with a specific personality:
-
-```html
-<realtime-voice-agent agent="operator"></realtime-voice-agent>
-```
-
-Available agents are `companion`, `paperclip`, `hermes`, `operator`, and `custom`.
+Per-event tracing (key presses, paste timing, cleanup) is written to `debug.log`. Set `GVOICE_DEBUG=1` to also echo those traces to the console while developing.

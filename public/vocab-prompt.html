@@ -1,0 +1,88 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      html, body {
+        margin: 0;
+        padding: 0;
+        background: transparent;
+        overflow: hidden;
+        -webkit-user-select: none;
+        user-select: none;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+      body {
+        display: flex;
+        align-items: flex-start;
+        justify-content: flex-start;
+        height: 100vh;
+        padding: 6px;
+        box-sizing: border-box;
+      }
+      .card {
+        background: rgba(22, 26, 32, 0.98);
+        color: #fff;
+        border-radius: 14px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+        padding: 12px 14px;
+        width: 100%;
+        box-sizing: border-box;
+      }
+      .head { font-size: 13px; line-height: 1.35; font-weight: 600; color: #e7eef5; }
+      .head b { color: #fff; }
+      .sub { font-size: 11.5px; line-height: 1.35; color: #9fb0c0; margin-top: 3px; }
+      .row { display: flex; gap: 8px; margin-top: 11px; }
+      button {
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 600;
+        border: 0;
+        border-radius: 999px;
+        padding: 7px 14px;
+        cursor: pointer;
+        transition: background 0.12s ease, opacity 0.12s ease;
+      }
+      .add { color: #06210f; background: #34d399; }
+      .add:hover { background: #4ae3aa; }
+      .no { color: #cdd8e3; background: rgba(255, 255, 255, 0.12); }
+      .no:hover { background: rgba(255, 255, 255, 0.2); }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="head" id="head">Add a word?</div>
+      <div class="sub" id="sub"></div>
+      <div class="row">
+        <button class="add" id="add" type="button">Add</button>
+        <button class="no" id="no" type="button">No thanks</button>
+      </div>
+    </div>
+
+    <script>
+      const headEl = document.getElementById("head");
+      const subEl = document.getElementById("sub");
+      const addBtn = document.getElementById("add");
+      const noBtn = document.getElementById("no");
+      let term = "";
+
+      function esc(s) {
+        return String(s).replace(/[&<>"]/g, (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+      }
+
+      window.vocabBridge.onPrompt((data) => {
+        term = (data && data.term) || "";
+        const reason = data && data.reason;
+        headEl.innerHTML = "Add <b>“" + esc(term) + "”</b> to your dictionary?";
+        subEl.textContent =
+          reason === "correction"
+            ? "Looks like you fixed this. Save it so it's typed right next time."
+            : "Save it so GVoice spells it right next time you say it.";
+      });
+
+      addBtn.addEventListener("click", () => window.vocabBridge.add(term));
+      noBtn.addEventListener("click", () => window.vocabBridge.dismiss(term));
+    </script>
+  </body>
+</html>

@@ -1,5 +1,8 @@
 // @ts-check
-import "dotenv/config";
+// Must be first: prepares PATH + loads .env from the app home before any module
+// reads process.env (see src/bootstrap-env.js). Replaces the old
+// `import "dotenv/config"`, which only worked when launched from the repo dir.
+import "./src/bootstrap-env.js";
 import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification, clipboard } from "electron";
 
 // Brand the app as "GVoice" even when run unpackaged (otherwise the menu bar,
@@ -34,6 +37,8 @@ import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
 import { wrapWav } from "./src/providers/_shared.js";
+import * as vocab from "./src/vocab.js";
+import { createCorrectionWatcher } from "./src/correction-watch.js";
 import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused } from "./src/foreground.js";
 import { appendFileSync, statSync, renameSync, unlinkSync, existsSync } from "node:fs";
 import { writeFile as writeFileAsync, readdir, unlink as unlinkAsync, rm as rmAsync, mkdir as mkdirAsync } from "node:fs/promises";
@@ -42,9 +47,15 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const envPath = join(__dirname, ".env");
 
 /** @type {import("electron").BrowserWindow | null} */
+let splashWindow = null;
+/** @type {import("electron").BrowserWindow | null} */
 let pillWindow = null;
 /** @type {import("electron").BrowserWindow | null} */
 let dictationWindow = null;
+/** @type {import("electron").BrowserWindow | null} */
+let vocabWindow = null;
+/** @type {import("electron").BrowserWindow | null} */
+let dictionaryWindow = null;
 /** @type {string | null} */
 let recordingsDir = null;
 // The transcript + recording shown on the current result pill, so the pill's
@@ -92,6 +103,43 @@ function dlog(/** @type {string} */ tag, /** @type {unknown} */ data) {
 
 /** @type {number | null} */
 let savedForegroundHwnd = null;
+
+// Per-event tracing is noisy (a line per press/release/cleanup/paste). Keep the
+// durable record in debug.log via dlog(); only echo these to the console when
+// GVOICE_DEBUG is set. Genuine errors stay on console.error unconditionally.
+const VERBOSE = process.env.GVOICE_DEBUG === "1" || process.env.GVOICE_DEBUG === "true";
+function debug(/** @type {any[]} */ ...args) {
+  if (VERBOSE) console.error(...args);
+}
+
+// --- Custom-dictionary suggestion state ---
+// Cursor pop-up size (fixed; the card height is set in CSS). One source so the
+// window bounds and the cursor-anchoring math can't drift apart.
+const VOCAB_SIZE = { width: 300, height: 104 };
+// How long after a dictation we watch for a manual correction (macOS/Linux).
+// Kept short so we're not comparing every word typed in normal post-dictation
+// prose against the last transcript.
+const CORRECTION_WATCH_MS = Number(process.env.GVOICE_CORRECTION_WATCH_MS || 12000);
+// Set once the pop-up window's HTML has loaded and registered its IPC handler,
+// so the very first prompt isn't sent into the void.
+let vocabWindowReady = false;
+// Words GVoice typed in the just-finished dictation, used to recognise a manual
+// fix as a near-miss of one of them.
+/** @type {string[]} */
+let recentTypedWords = [];
+// The term currently shown on the cursor pop-up (one at a time).
+/** @type {string | null} */
+let pendingVocabTerm = null;
+// Terms already offered this session, so an ignored prompt isn't re-shown until
+// restart (an explicit "No thanks" persists in vocab's dismissed list forever).
+const promptedThisSession = new Set();
+let vocabHideTimer = null;
+const correctionWatcher = createCorrectionWatcher({
+  onWord: (word) => {
+    const matched = vocab.isLikelyCorrection(word, recentTypedWords);
+    if (matched) showVocabPrompt(word, "correction");
+  }
+});
 
 // Whisper "non-speech" tokens that the model emits for music, applause,
 // keyboard noise, silence, etc. These are model artifacts, not speech the
@@ -145,6 +193,130 @@ async function bootRelayServer() {
     serverError = error.message || String(error);
     return null;
   }
+}
+
+// Splash readiness, mirroring vocabWindowReady: a status pushed before the
+// renderer has attached its IPC listener would be dropped, so we hold the
+// latest one and flush it on load. `splashDismissed` makes the tuck-away
+// animation run exactly once even if two code paths request it.
+let splashReady = false;
+let splashDismissed = false;
+/** @type {{ message: string, state: string } | null} */
+let pendingSplashStatus = null;
+
+// The boot splash: a small, frameless, branded "Starting GVoice…" card shown
+// the instant the app launches, so the first thing the user sees is the app —
+// not a terminal or a bare window. It reports boot progress, then animates
+// itself down into the menu-bar / tray icon and closes, leaving the app running
+// silently. Centered on whichever display the cursor is on.
+function createSplashWindow() {
+  const display = screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+  const width = 360;
+  const height = 300;
+  const wa = display.workArea;
+  splashWindow = new BrowserWindow({
+    width,
+    height,
+    x: Math.round(wa.x + (wa.width - width) / 2),
+    y: Math.round(wa.y + (wa.height - height) / 2),
+    frame: false,
+    transparent: true,
+    resizable: false,
+    movable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    show: false,
+    hasShadow: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, "preload-splash.cjs")
+    }
+  });
+  splashWindow.setAlwaysOnTop(true, "screen-saver");
+  splashWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  // Once the renderer's IPC handler is live, flush whatever the latest status
+  // was (boot stages set before this point would otherwise be dropped).
+  splashWindow.webContents.once("did-finish-load", () => {
+    splashReady = true;
+    if (pendingSplashStatus) splashWindow?.webContents.send("splash:status", pendingSplashStatus);
+  });
+  // Loaded from disk (not the relay) because the splash must appear before the
+  // relay server is up.
+  splashWindow.loadFile(join(__dirname, "public", "splash.html"));
+  splashWindow.once("ready-to-show", () => splashWindow?.showInactive());
+}
+
+// Push a boot-progress line to the splash. `state` drives the look:
+// "loading" (default), "ready" (green), or "error" (red). Held until the
+// renderer is ready (see createSplashWindow); the latest status wins.
+function setSplashStatus(
+  /** @type {string} */ message,
+  /** @type {"loading" | "ready" | "error"} */ state = "loading"
+) {
+  if (!splashWindow || splashWindow.isDestroyed()) return;
+  pendingSplashStatus = { message, state };
+  if (splashReady) splashWindow.webContents.send("splash:status", pendingSplashStatus);
+}
+
+// Animate the splash shrinking and sliding down into the tray icon, then close
+// it — the visual "the app tucked itself into the menu bar" moment. Falls back
+// to the top-right corner if the tray bounds aren't reported (some Linux DEs,
+// or before the tray exists). Pure main-process bounds/opacity animation so it
+// works on a transparent, non-focusable window.
+function dismissSplashToTray() {
+  if (splashDismissed) return;
+  splashDismissed = true;
+  if (!splashWindow || splashWindow.isDestroyed()) {
+    splashWindow = null;
+    return;
+  }
+  const win = splashWindow;
+  const start = win.getBounds();
+  const trayBounds = (() => {
+    try { return tray?.getBounds?.(); } catch { return null; }
+  })();
+  let targetCx;
+  let targetCy;
+  if (trayBounds && trayBounds.width) {
+    targetCx = trayBounds.x + trayBounds.width / 2;
+    targetCy = trayBounds.y + trayBounds.height / 2;
+  } else {
+    // No tray rect: aim for the top-right (macOS menu bar) corner of the display.
+    const wa = screen.getDisplayNearestPoint({ x: start.x, y: start.y }).workArea;
+    targetCx = wa.x + wa.width - 24;
+    targetCy = wa.y + 12;
+  }
+  const startCx = start.x + start.width / 2;
+  const startCy = start.y + start.height / 2;
+  const steps = 22;
+  let i = 0;
+  const timer = setInterval(() => {
+    i++;
+    if (!splashWindow || splashWindow.isDestroyed()) {
+      clearInterval(timer);
+      splashWindow = null;
+      return;
+    }
+    // Ease-in (accelerate toward the tray) on a 0..1 progress.
+    const p = i / steps;
+    const e = p * p;
+    const scale = 1 - 0.82 * e; // shrink to ~18% of its size
+    const w = Math.max(24, Math.round(start.width * scale));
+    const h = Math.max(20, Math.round(start.height * scale));
+    const cx = startCx + (targetCx - startCx) * e;
+    const cy = startCy + (targetCy - startCy) * e;
+    win.setBounds({ x: Math.round(cx - w / 2), y: Math.round(cy - h / 2), width: w, height: h });
+    win.setOpacity(Math.max(0, 1 - e));
+    if (i >= steps) {
+      clearInterval(timer);
+      if (!win.isDestroyed()) win.close();
+      splashWindow = null;
+    }
+  }, 16);
 }
 
 function createPillWindow() {
@@ -288,6 +460,148 @@ function hidePill() {
   }
 }
 
+// The "add to dictionary?" pop-up. Like the pill, it's a frameless,
+// non-focusable, always-on-top window so clicking its buttons never steals the
+// caret from whatever the user is typing into. It appears next to the mouse
+// cursor (the text caret's screen position isn't reliably available across apps
+// on macOS, but the cursor is where the user's attention already is).
+function createVocabWindow() {
+  vocabWindow = new BrowserWindow({
+    width: VOCAB_SIZE.width,
+    height: VOCAB_SIZE.height,
+    frame: false,
+    transparent: true,
+    resizable: true,
+    movable: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    focusable: false,
+    show: false,
+    backgroundColor: "#00000000",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, "preload-vocab.cjs")
+    }
+  });
+  vocabWindow.setAlwaysOnTop(true, "screen-saver");
+  vocabWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true, skipTransformProcessType: true });
+  // It has clickable buttons, so (unlike the passive pill) mouse events stay on.
+  vocabWindow.setIgnoreMouseEvents(false);
+  vocabWindow.webContents.once("did-finish-load", () => { vocabWindowReady = true; });
+  if (serverPort) {
+    vocabWindow.loadURL(`http://localhost:${serverPort}/vocab-prompt.html`);
+  } else {
+    vocabWindow.loadFile(join(__dirname, "public", "vocab-prompt.html"));
+  }
+}
+
+// Place the pop-up just below-right of the mouse cursor, flipping/clamping so it
+// always stays inside the work area of the display under the cursor.
+function positionVocabAtCursor(/** @type {number} */ width, /** @type {number} */ height) {
+  if (!vocabWindow) return;
+  const pt = screen.getCursorScreenPoint();
+  const wa = screen.getDisplayNearestPoint(pt).workArea;
+  let x = pt.x + 16;
+  let y = pt.y + 18;
+  if (x + width > wa.x + wa.width) x = pt.x - width - 16;
+  if (y + height > wa.y + wa.height) y = pt.y - height - 18;
+  x = Math.max(wa.x, Math.min(x, wa.x + wa.width - width));
+  y = Math.max(wa.y, Math.min(y, wa.y + wa.height - height));
+  vocabWindow.setBounds({ x, y, width, height });
+}
+
+// Offer to add `term` to the custom dictionary. No-ops if a prompt is already
+// up, the term is already known/declined, or we've already asked this session.
+function showVocabPrompt(/** @type {string} */ term, /** @type {"name" | "correction"} */ reason) {
+  if (!vocabWindow || vocabWindow.isDestroyed() || !term) return;
+  if (pendingVocabTerm) return;
+  const key = term.toLowerCase();
+  if (promptedThisSession.has(key)) return;
+  try { if (vocab.isKnown(term) || vocab.isDismissed(term)) return; } catch { return; }
+  pendingVocabTerm = term;
+  promptedThisSession.add(key);
+  positionVocabAtCursor(VOCAB_SIZE.width, VOCAB_SIZE.height);
+  // Send only once the renderer has registered its onPrompt handler, or the
+  // first prompt of a session (before the window finishes loading) would be
+  // dropped and the card would show its empty placeholder.
+  const send = () => vocabWindow?.webContents.send("vocab:prompt", { term, reason });
+  if (vocabWindowReady) send();
+  else vocabWindow.webContents.once("did-finish-load", send);
+  vocabWindow.showInactive();
+  dlog("vocab-prompt", { term, reason });
+  clearTimeout(vocabHideTimer);
+  // If the user ignores it, fade out after a bit. Not a decision either way:
+  // the term stays un-dismissed, just not re-asked until next restart.
+  vocabHideTimer = setTimeout(hideVocab, 7000);
+}
+
+function hideVocab() {
+  clearTimeout(vocabHideTimer);
+  vocabHideTimer = null;
+  pendingVocabTerm = null;
+  if (vocabWindow && !vocabWindow.isDestroyed() && vocabWindow.isVisible()) {
+    vocabWindow.hide();
+  }
+}
+
+// After a successful dictation: look for "likely-misheard name" candidates in
+// the text we typed, offer the first one, and arm the manual-correction watcher
+// so a hand-typed fix over the next few seconds can also be offered.
+function maybeSuggestVocab(/** @type {string} */ typedText) {
+  try {
+    recentTypedWords = vocab.wordsOf(typedText);
+    correctionWatcher.arm(CORRECTION_WATCH_MS);
+    const candidates = vocab.detectCandidates(typedText);
+    if (candidates.length) showVocabPrompt(candidates[0], "name");
+  } catch (err) {
+    debug("[vocab] suggestion failed:", err && err.message);
+  }
+}
+
+// The dictionary manager — a normal, focusable window (tray → "Manage
+// dictionary…") where the user types in the names and made-up words the engine
+// should spell exactly. This is the reliable way to seed words the engine
+// mishears: the cursor pop-up can only confirm what was transcribed, but a
+// made-up word gets transcribed as something else, so it can never be captured
+// that way. Words added here bias every engine on the next dictation.
+function openDictionaryWindow() {
+  // This is an accessory app (Dock hidden), so a window won't become key on its
+  // own — pull the whole app forward so the text field actually accepts typing.
+  app.focus({ steal: true });
+  if (dictionaryWindow && !dictionaryWindow.isDestroyed()) {
+    dictionaryWindow.show();
+    dictionaryWindow.focus();
+    return;
+  }
+  dictionaryWindow = new BrowserWindow({
+    width: 440,
+    height: 540,
+    title: "GVoice dictionary",
+    show: true,
+    resizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: "#14181e",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, "preload-dictionary.cjs")
+    }
+  });
+  dictionaryWindow.on("closed", () => { dictionaryWindow = null; });
+  dictionaryWindow.webContents.once("did-finish-load", () => {
+    if (dictionaryWindow && !dictionaryWindow.isDestroyed()) dictionaryWindow.focus();
+  });
+  if (serverPort) {
+    dictionaryWindow.loadURL(`http://localhost:${serverPort}/dictionary.html`);
+  } else {
+    dictionaryWindow.loadFile(join(__dirname, "public", "dictionary.html"));
+  }
+}
+
 function createDictationWindow() {
   if (!serverPort) return;
   dictationWindow = new BrowserWindow({
@@ -322,7 +636,7 @@ function toggleLanguage() {
   const idx = DICTATION_LANGUAGES.indexOf(current);
   const next = DICTATION_LANGUAGES[(idx + 1) % DICTATION_LANGUAGES.length];
   process.env.WHISPER_LANGUAGE = next;
-  console.error("[main] language toggled " + current + " -> " + next);
+  debug("[main] language toggled " + current + " -> " + next);
   updateTrayTooltip();
   return next;
 }
@@ -345,7 +659,7 @@ async function setupHotkey() {
     const fireRelease = (/** @type {string} */ source) => {
       if (!dictation.release()) return;
       dlog("release", { source });
-      console.error("[main] dictation:stop (" + source + ")");
+      debug("[main] dictation:stop (" + source + ")");
       dictationWindow.webContents.send("dictation:stop");
       // Keep the pill visible but switch it to the pulsing-blue "Transcribing…"
       // state so the user can see work is still happening. A terminal event
@@ -359,10 +673,15 @@ async function setupHotkey() {
     hotkeyEngine = mod.startHotkey({
       onPress: () => {
         if (!dictation.tryStart()) return;
+        // A new dictation supersedes any correction-watch window from the last
+        // one, and clears a pop-up the user never answered.
+        correctionWatcher.disarm();
+        recentTypedWords = [];
+        hideVocab();
         const profile = { language: getCurrentLanguage(), model: process.env.DEEPGRAM_MODEL || "nova-3" };
         savedForegroundHwnd = captureForegroundWindow();
         dlog("press", { profile, hwnd: savedForegroundHwnd });
-        console.error("[main] dictation:start lang=" + profile.language + " (hwnd=" + savedForegroundHwnd + ")");
+        debug("[main] dictation:start lang=" + profile.language + " (hwnd=" + savedForegroundHwnd + ")");
         showPillForWindow(savedForegroundHwnd);
         dictationWindow.webContents.send("dictation:start", profile);
       },
@@ -416,12 +735,12 @@ async function processTranscript(transcript, restoreHwnd = null) {
     try {
       const { polishTranscript } = await import("./src/cleanup.js");
       textToType = await polishTranscript(textToType);
-      console.error("[main] cleanup done (" + (Date.now() - t0) + "ms):", JSON.stringify(textToType));
+      debug("[main] cleanup done (" + (Date.now() - t0) + "ms):", JSON.stringify(textToType));
     } catch (error) {
       console.error("[main] Cleanup pass failed, using raw:", error.message);
     }
   } else {
-    console.error("[main] cleanup SKIPPED (short/clean, length=" + textToType.length + ")");
+    debug("[main] cleanup SKIPPED (short/clean, length=" + textToType.length + ")");
   }
 
   textToType = (textToType || "").trim();
@@ -459,7 +778,7 @@ async function processTranscript(transcript, restoreHwnd = null) {
     typed &&
     !(restoreHwnd != null && restored === false) &&
     fieldFocused !== false;
-  console.error("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ", fieldFocused=" + fieldFocused + ", pasted=" + pasted + ")");
+  debug("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ", fieldFocused=" + fieldFocused + ", pasted=" + pasted + ")");
   dlog("typed", { len: textToType.length, ms: Date.now() - tType, fieldFocused, pasted });
   return { text: textToType, pasted };
 }
@@ -504,7 +823,7 @@ function setupIpc() {
     const chunks = (payload && typeof payload === "object" && payload.chunks) || null;
     const sampleRate = (payload && typeof payload === "object" && payload.sampleRate) || undefined;
     const { releaseAt, sinceRelease } = dictation.finalize();
-    console.error("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(text));
+    debug("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(text));
     dlog("transcript", { len: (text || "").trim().length, sinceRelease });
 
     // Empty transcript = silence, a filtered hallucination, or a misfire
@@ -525,7 +844,7 @@ function setupIpc() {
       // and pastes — restoring focus right before the paste lands.
       const result = await processTranscript(text, savedForegroundHwnd);
       savedForegroundHwnd = null;
-      console.error("[main] total since release: " + (Date.now() - releaseAt) + "ms");
+      debug("[main] total since release: " + (Date.now() - releaseAt) + "ms");
       if (!result || !result.text) {
         // Noise-only after cleanup — nothing landed. Quiet hide.
         console.error("[main] transcript was noise-only, dropped");
@@ -534,6 +853,10 @@ function setupIpc() {
         // Success only when we're confident the text was pasted somewhere;
         // otherwise show Error so the user can Copy it / open the recording.
         showPillResult(result.pasted ? "success" : "error", result.text, recordingPath);
+        // Offer to teach the dictionary any likely-misheard names, and start
+        // watching for a hand-typed correction. Only when the text actually
+        // landed somewhere.
+        if (result.pasted) maybeSuggestVocab(result.text);
       }
     } catch (error) {
       console.error("[main] Typing failed:", error.stack || error.message);
@@ -576,6 +899,36 @@ function setupIpc() {
     }
   });
   ipcMain.on("pill:hide", () => hidePill());
+
+  // Cursor "add to dictionary?" pop-up actions.
+  ipcMain.on("vocab:add", (_event, term) => {
+    const added = vocab.addTerm(term);
+    dlog("vocab-add", { term, added });
+    hideVocab();
+  });
+  ipcMain.on("vocab:dismiss", (_event, term) => {
+    vocab.dismissTerm(term);
+    dlog("vocab-dismiss", { term });
+    hideVocab();
+  });
+
+  // Dictionary manager window (request/response — each returns the updated list).
+  ipcMain.handle("vocab:list", () => vocab.getTerms());
+  ipcMain.handle("vocab:add-many", (_event, text) => {
+    const parts = (Array.isArray(text) ? text : String(text || "").split(/[,\n]/));
+    let added = 0;
+    for (const part of parts) {
+      const word = String(part).trim();
+      if (word && vocab.addTerm(word)) added++;
+    }
+    dlog("vocab-add-many", { added });
+    return vocab.getTerms();
+  });
+  ipcMain.handle("vocab:remove", (_event, term) => {
+    vocab.removeTerm(term);
+    dlog("vocab-remove", { term });
+    return vocab.getTerms();
+  });
 
   // The renderer lost the microphone (disconnected, muted, seized by another
   // app, or silent for several holds in a row) and rebuilt its capture. Make
@@ -625,6 +978,12 @@ function createTray() {
         app.setLoginItemSettings({ openAtLogin: item.checked });
       }
     },
+    {
+      // Open the dictionary manager: add the names/made-up words the engine
+      // should spell exactly, and review or remove existing ones.
+      label: "Manage dictionary…",
+      click: () => openDictionaryWindow()
+    },
     { type: "separator" },
     {
       label: "Quit",
@@ -668,6 +1027,11 @@ function buildAppMenu() {
 }
 
 app.whenReady().then(async () => {
+  // The very first thing on screen: a branded splash, not a terminal or a bare
+  // window. It reports boot progress and later tucks itself into the tray.
+  createSplashWindow();
+  setSplashStatus("Starting up…");
+
   // Headless tray app — Electron's "no windows" default behaviour would quit
   // the process otherwise. The pill/dictation windows come and go; we want
   // the tray to stay live regardless.
@@ -681,15 +1045,37 @@ app.whenReady().then(async () => {
   recordingsDir = join(app.getPath("userData"), "temp-recordings");
   await rmAsync(recordingsDir, { recursive: true, force: true }).catch(() => {});
   await mkdirAsync(recordingsDir, { recursive: true }).catch(() => {});
+  // Custom dictionary lives in userData so it survives reinstalls/updates and
+  // isn't bundled into the read-only app. The providers read it on every
+  // connection; the cursor pop-up writes to it.
+  vocab.init(join(app.getPath("userData"), "custom-vocab.json"));
+
+  setSplashStatus("Starting the local relay…");
   await bootRelayServer();
   buildAppMenu();
   createTray();
   if (serverPort) {
     createPillWindow();
+    createVocabWindow();
     createDictationWindow();
-    dictationWindow.webContents.once("did-finish-load", () => {
-      setupHotkey();
+    setSplashStatus("Connecting to your speech engine…");
+    // Backstop: if the dictation window's load never completes (relay route
+    // hangs, renderer crash), still tuck the splash away instead of leaving it
+    // pinned on screen. The normal ready path below fires well before this.
+    setTimeout(dismissSplashToTray, 9000);
+    dictationWindow.webContents.once("did-finish-load", async () => {
+      await setupHotkey();
+      // Fully live now: flip the splash to its "ready" look, let it land for a
+      // beat, then animate it down into the tray and disappear.
+      const holdKey = process.platform === "darwin" ? "right Option" : "right Alt";
+      setSplashStatus(`Ready — hold ${holdKey} to dictate.`, "ready");
+      setTimeout(dismissSplashToTray, 650);
     });
+  } else {
+    // Relay couldn't start (usually a missing API key). Surface it on the
+    // splash instead of failing silently, then tuck it away — the tray stays.
+    setSplashStatus(serverError || "Couldn't start. Check your settings.", "error");
+    setTimeout(dismissSplashToTray, 4500);
   }
   setupIpc();
 
@@ -720,4 +1106,5 @@ app.on("before-quit", () => {
   if (hotkeyEngine && typeof hotkeyEngine.stop === "function") {
     try { hotkeyEngine.stop(); } catch {}
   }
+  try { correctionWatcher.stop(); } catch {}
 });

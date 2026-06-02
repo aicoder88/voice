@@ -8,6 +8,7 @@
 
 import WebSocket from "ws";
 import { sendToClient, forwardUnexpectedResponse } from "./_shared.js";
+import * as vocab from "../vocab.js";
 
 /**
  * @param {WebSocket} clientSocket
@@ -28,10 +29,20 @@ export function attach(clientSocket, { apiKey, model, language }) {
     endpointing: "false",
     vad_events: "false"
   });
-  // smart_format is English-only on Deepgram. Adding it with language=hr (or
-  // any other non-English) returns HTTP 400 at the WS handshake.
+  // smart_format and custom-vocabulary boosting are English-only on Deepgram.
+  // Adding either with language=hr (or any other non-English) returns HTTP 400
+  // at the WS handshake.
   if (lang === "en" || lang === "en-us" || lang === "en-gb") {
     params.set("smart_format", "true");
+    // Bias toward the user's custom dictionary. nova-3 uses keyterm prompting;
+    // older Deepgram models use the keywords param. Each term is appended as a
+    // repeated query param. Re-read per connection so freshly-added words apply
+    // to the very next dictation.
+    try {
+      const terms = vocab.deepgramKeyterms();
+      const param = /nova-3/i.test(model) ? "keyterm" : "keywords";
+      for (const term of terms) params.append(param, term);
+    } catch {}
   }
   const dgUrl = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
   const dgSocket = new WebSocket(dgUrl, {

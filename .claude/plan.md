@@ -1,31 +1,38 @@
-# Plan — audio backup + retry/play safety net
+# Plan — custom dictionary + polish pass
 
-Goal: a long dictation must never be silently lost. When transcription fails,
-save the captured audio to disk and show a pop-up with two actions: **Retry**
-(re-transcribe the same audio) and **Play** (listen to the recording).
+Goal: GVoice learns the names/jargon it mishears. After a dictation, a pop-up at
+the cursor offers to add an unusual name — or a word the user just hand-fixed —
+to a custom dictionary that biases every speech engine. Plus four polish fixes.
 
-Ordered by impact:
+Status: COMPLETE (not committed — awaiting user go-ahead).
 
-1. **Persist audio on failure** — renderer accumulates the full utterance PCM
-   (pre-roll + everything streamed), and on a genuine processing failure ships
-   it to the main process, which writes a timestamped WAV under
-   `userData/recordings/`. (src/backup.js, public/dictation.js, preload.cjs,
-   main.js)
+Impact-ordered:
 
-2. **Detect the three failure shapes** in the renderer:
-   - explicit `local.error`/`error` frame
-   - socket not open at commit (lost connection mid-dictation)
-   - no terminal frame within a failure timeout (transcriber hung)
-   A silence-gate empty (`completed` with empty transcript) is NOT a failure.
+1. **Custom dictionary store** — `src/vocab.js`. One JSON store
+   (`userData/custom-vocab.json`) shared in-process by main.js (writes) and the
+   relay providers (read). Candidate detection (likely-misheard names),
+   correction matching (Levenshtein near-miss), add/dismiss, per-provider
+   formatting. DONE + 18 unit assertions pass.
 
-3. **Error pop-up window** with Retry + Play. (public/backup-error.html,
-   preload-backup.cjs, main.js)
+2. **Feed all three engines** — whisper-local (initial prompt), deepgram (nova-3
+   `keyterm`, English-only), openai (transcription `prompt`). DONE. Parity 5/5.
 
-4. **Retry path in main** — replay the saved WAV through the relay over a Node
-   WebSocket (same protocol the parity test uses). On success, run the normal
-   cleanup + type pipeline and delete the backup. (src/backup.js, main.js)
+3. **Cursor pop-up** — `public/vocab-prompt.html` + `preload-vocab.cjs` +
+   `createVocabWindow`/`showVocabPrompt` in main.js. Frameless, non-focusable,
+   appears at the mouse cursor. Add / No-thanks. Asks once per word per session;
+   "No thanks" persists forever. DONE.
 
-5. **Serve recordings over the local HTTP server** so the pop-up's `<audio>`
-   element can play the WAV. (server.js)
+4. **Manual-correction watcher** — `src/correction-watch.js`. Adds its own
+   keydown/mousedown listener to the existing uiohook singleton, armed for
+   ~25s after each dictation, reconstructs hand-typed words, offers the ones
+   that look like a fix of what GVoice typed. macOS/Linux only. DONE.
 
-Notes / decisions: see notes.md.
+5. **Polish fixes**:
+   - README rewritten for GVoice (was the old "Realtime Voice Agents" demo). DONE.
+   - Stale `.claude/` docs refreshed (this pass). DONE.
+   - Per-event console logs gated behind `GVOICE_DEBUG` in main.js + hotkey.js. DONE.
+   - `debug.log` deleted (gitignored). DONE.
+   - (#4 from the audit — Windows-only build target — intentionally skipped:
+     the app runs on macOS via `electron .`, no Mac packaging target needed.)
+
+See notes.md for decisions and the review-gate outcome.

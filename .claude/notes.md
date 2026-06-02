@@ -1,109 +1,143 @@
-# Notes — backup safety net
+# Notes — custom dictionary + polish pass
 
-Decisions:
-- **Back up on failure only**, not every dictation. The stated problem is lost
-  transcripts when processing fails; backing up every successful dictation adds
-  a privacy + disk-growth concern for no stated benefit. Failed recordings are
-  kept until a retry succeeds (then deleted) or the user dismisses the pop-up.
-- **Retry runs in the main process** by replaying the saved WAV through the
-  relay over a Node WebSocket — identical to how scripts/parity replays a
-  fixture. This works even after an app restart and reuses every provider's
-  existing pipeline, instead of poking the (hidden) renderer.
-- **Failure timeout is separate from the existing 1200ms delta-flush fallback.**
-  Declaring "the transcriber hung" at 1200ms would false-positive on slow but
-  working transcriptions of long clips, so there is a longer DICTATION_FAILURE_MS
-  (default 20s) timer that only fires the pop-up when NO terminal frame arrives.
-- **Silence is not failure.** The relay returns a `completed` frame with an
-  empty transcript for silence / hallucination. That sets gotTerminalEvent and
-  never triggers the pop-up.
+## Key architecture decision
+main.js and the relay/providers run in the SAME node process (server is booted
+in-process), so the dictionary is ONE module — `src/vocab.js` — with an
+in-memory cache backed by one JSON file. main.js writes (on "Add"); the
+providers read (on every connection). No IPC between them. This collapsed what
+looked like a multi-process problem into a single shared module.
 
-Rejected: keeping the PCM in the renderer for retry — loses durability across a
-crash/restart and couples retry to a hidden window. WS replay from main is the
-smaller, more robust path.
+## Product decisions (from the user's answers)
+- **Trigger = "only likely-misheard names."** detectCandidates is conservative:
+  mid-sentence capitalized, ≥3 chars, real uppercase initial, not common, not
+  already known/dismissed. Each unknown name is asked at most ONCE (session set
+  + persistent dismissed list), so it converges to silence.
+- **All three engines biased.** Whisper initial-prompt, Deepgram nova-3 keyterm
+  (English-only — Deepgram limitation), OpenAI transcription prompt.
+- **"Corrected" = watch manual edits** (the fuller option the user picked) PLUS
+  it naturally covers cleanup-diff cases (a word the cleanup changed stays
+  known). The manual-edit watcher (src/correction-watch.js) reconstructs
+  hand-typed words from the uiohook keystream during a short post-dictation
+  window and offers ones that are a near-miss (Levenshtein ≤2) of what GVoice
+  typed.
 
-## Review gate (adversarial + simplicity)
+## Anchoring the pop-up
+The text caret's screen position isn't reliably available across apps on macOS,
+so the pop-up anchors to the MOUSE cursor (where attention already is), not the
+caret. Documented; acceptable for v1.
 
-Merged:
-- Hardened the /recordings/ route with a resolved-path containment check
-  (resolve + startsWith base+sep), replacing string heuristics.
-- Boot-time prune of recordings older than 7 days (BACKUP_RETENTION_DAYS), so
-  dismissed/played-back backups don't accumulate forever.
-- Socket-identity guard in dictation.js so a late frame from a replaced socket
-  can't flip the new utterance's state.
-- Deduped wrapWav into providers/_shared.js (the old "worklets can't share"
-  comment was wrong — both call sites are plain Node modules).
+## Rabbit-hole avoided
+A fully robust cross-layout, cross-app keylogger-style correction detector is a
+large, fragile subsystem. Kept it pragmatic: US-letter layout + shift, bounded
+to the armed window, in-memory only, listeners attached ONLY while armed. Names
+are ASCII in practice; on other layouts it degrades to "no suggestion," never
+wrong data. Flagged as the main scope cut.
 
-Rejected (one line each):
-- Partial-delta-then-hang typing a partial as success: pre-existing behavior,
-  and a partial typed is better than nothing; Play still recovers full audio.
-- Provider mismatch on retry (uses env STT_PROVIDER): provider is fixed per
-  session via env (changing it needs a restart), and Play recovers the audio
-  regardless — not worth encoding provider per-file.
-- Base64 IPC stall: already chunked per ~4KB frame, runs in the hidden
-  dictation renderer, so any stall is invisible to the user.
-- Utterance-ID tagging for timers: the stale failure timer is already cleared
-  on the next startRecording(), so the real path is covered.
+## Review gate (adversarial + simplicity) — outcome
+Merged (behavior/shape change, smaller or clearer, right regardless of source):
+- **CRITICAL** detectCandidates used `[A-ZÀ-ſ]`, which matches LOWERCASE accented
+  letters (ž/č/đ) → every lowercase Croatian word (the default language!) was a
+  false candidate. Now `/^\p{Lu}/u`. Verified by test.
+- **HIGH** First pop-up could be sent before the renderer registered its handler
+  → lost. Now gated on the window's did-finish-load.
+- **HIGH/MED** The 25s self-comparing correction window would nag during normal
+  post-dictation typing. Now: corrections must be capitalized (name-like) AND
+  the window dropped to 12s.
+- **HIGH** WORD_RE's shared global lastIndex was correct only by luck.
+  detectCandidates now uses a fresh regex instance.
+- **MED** Deepgram keyterms were unbounded → handshake URL could grow past
+  server limits as the dictionary fills. Capped at the 100 most recent.
+- **MED/privacy** The keystroke listener was attached for the whole app
+  lifetime (gated only in JS). Now attached only while armed, and self-detaches
+  when the window lapses — not a standing global key listener.
+- **Simplicity** Removed dead `getStorePath()` export, removed the never-called
+  `vocab:hide` wire (preload + IPC), hoisted the duplicated 300×104 size const.
 
-## Merge with origin/main (parallel work from another machine)
+Rejected:
+- US-layout / Caps-Lock limitations of the watcher — documented, out of v1 scope.
+- dismiss-key normalization divergence — can't occur for clean word tokens
+  (candidates come from a letters/'/- regex).
+- Mouse-vs-caret anchoring — by design (caret position unavailable cross-app).
 
-origin/main had diverged 6 commits (single-instance lock, foreground-window
-capture/restore, GetAsyncKeyState Windows hotkey + right-Ctrl hr/en toggle,
-Croatian/Deepgram, input-gain worklet, log rotation, Mac restore, hi-DPI tray
-icons). User chose "combine everything, this computer's recording pipeline wins
-on conflicts." Resolution:
-- hotkey.js: took origin/main's platform-split detector (superset; carries the
-  Croatian toggle). Not part of the recording pipeline.
-- dictation.js: took THIS computer's pipeline (pre-roll, AGC off, warm capture,
-  backup hooks), then grafted the Deepgram language profile so the Croatian
-  toggle still works. Dropped the server's per-press worklet setup + 30s cap.
-- whisper-local.js: auto-merged cleanly — kept this computer's silence gate +
-  sanitizer + the wrapWav move, plus the server's ensureWhisperServer
-  improvements (.exe handling, -fa GPU flag, stderr filtering).
-- main.js: combined both — server's single-instance/foreground/log-rotation/
-  language wiring + my backup IPC. processTranscript now also strips Whisper
-  noise tokens and restores foreground focus before pasting (live path passes
-  the saved hwnd; retry passes none).
+## Tests
+- src/vocab.js logic: 18 + 7 assertions (throwaway scripts) — all pass, incl.
+  the Croatian fix and the cap.
+- Parity 5/5 pass (providers still wire-compatible).
 
-JUDGMENT CALL to flag: the merged worklet applies a 2.5x soft-clipped input
-gain (server's audio tuning). initCapture now passes it explicitly
-(window.DICTATION_INPUT_GAIN overrides). This rides inside this computer's
-pipeline because it helps the kept Deepgram/Croatian path and is runtime-
-tunable; flip the default to 1 (≈linear) if raw-signal Whisper accuracy
-regresses.
+## Takes effect after restarting GVoice
+The hidden dictation window and the new pop-up window must reload the new
+preloads + HTML, so changes only apply after the app restarts.
 
-Verified post-merge: all JS syntax OK, parity 5/5, backup e2e (round-trip,
-prune, traversal guard, live retranscribe) pass.
+## Boot splash (2026-06-02)
+- Replaced the bare/terminal-style startup with a branded splash:
+  public/splash.html + preload-splash.cjs, driven from main.js
+  (createSplashWindow / setSplashStatus / dismissSplashToTray).
+- Shows boot stages (relay → engine → ready), then shrink+slide animates into
+  the tray icon and closes. Frameless, transparent, focusable:false,
+  showInactive — never steals the caret.
+- public/icon.png copied from build/icon.png (ships at runtime). package.json:
+  preload-splash.cjs added to build.files; mac/win icon config added.
 
-## Mic auto-recovery (silent-capture fix)
+Review-gate decisions (merged):
+- Single readiness flag + held latest status (mirrors vocabWindowReady) instead
+  of the per-call did-finish-load listener — earlier version stacked listeners
+  and could collapse/drop boot-stage messages.
+- Added a 9s dismiss backstop on the success path: if the dictation window's
+  load ever hangs, the splash still tucks away instead of pinning on screen.
+- One-shot `splashDismissed` guard so the backstop + ready path can't both run
+  the animation.
+- Dropped a no-op `icon:` option (frameless/transparent/dock-hidden window) and
+  its unused APP_ICON const.
+Rejected: nothing material outstanding.
 
-Symptom: dictation returned empty (`transcript len:0`) after working all
-morning; the local whisper-server was healthy (verified by POSTing a synthesized
-WAV to :8081 — transcribed perfectly). Root cause: the renderer acquired the mic
-ONCE at boot and reused that stream forever; when the external mic was
-unplugged/muted/seized (Teams/call apps present in the audio stack), the stream
-went silent with no recovery and no visible warning — it just typed nothing.
+## Packaged app (2026-06-02, follow-up)
+Problem: launching via a .command (always opens Terminal) or a thin .app wrapper
+made dictation "always error" — macOS grants Mic/Accessibility/Input-Monitoring
+per executable PATH, and the wrapper ran Electron under a different path/identity
+than the terminal launch (which borrowed Terminal's grants). Also stale copies
+piled up (kill patterns missed the symlink path) -> no clean tray, "can't quit".
 
-Fix (public/dictation.js + preload.cjs + main.js): three detectors, rebuild on
-NEXT press (never mid-hold):
-- track onended/onmute → teardown + warn (instant recovery on clean drops).
-- mediaDevices 'devicechange' → mark captureStale, rebuild next press.
-- silent-streak backstop: SILENT_STREAK_LIMIT (3) consecutive long holds with
-  worklet peak < SILENCE_PEAK (0.01) ⇒ warn + rebuild. Catches the macOS
-  live-but-silent track (no event) — the exact observed symptom. Single silent
-  hold is legitimate (held key, said nothing) so it never nags on one.
-- New visible channel: dictation:mic-warning → native Notification (throttled
-  10s) so failures are no longer silent.
+Fix: real packaged app via electron-builder.
+- package.json build.mac: target "dir", LSUIElement true, NSMicrophoneUsageDescription.
+- New src/bootstrap-env.js (imported FIRST in main.js, replaces dotenv/config):
+  prepends Homebrew to PATH, loads .env + resolves WHISPER_MODEL from an absolute
+  app home (GVOICE_HOME, default /Users/macmini/dev/voice) so a Finder launch with
+  bare PATH and cwd=/ still finds the whisper-server binary, .env, and model.
+- Built + signed (Apple Development cert on machine, team JZ4Z22F6BM) ->
+  /Applications/GVoice.app. Removed the Desktop wrapper.
+- .env stays OUT of the bundle (real API keys); the app reads it by absolute path,
+  so the dev folder must remain in place.
 
-Reused the worklet's already-emitted `peak` (was discarded) — zero added cost.
-Guarded audioWorklet.addModule with workletLoaded (re-adding re-runs
-registerProcessor → throws on duplicate name) so rebuilds don't crash.
+Known/parity:
+- koffi native binary was never downloaded (pnpm ignored its install script), so
+  the macOS AX focus-detection ("[foreground] AX init failed") is disabled — SAME
+  as the current dev/terminal launch. Paste still works via nut-js + clipboard.
+  Not a regression; left for later (would need pnpm approve-builds koffi + asarUnpack).
+- bootstrap-env.js hardcodes the dev-folder path as packaged default (behind
+  GVOICE_HOME + app.isPackaged). Machine-specific; fine for personal build.
 
-TRADEOFF flagged: on 'devicechange' we rebuild on the next press. If a browser
-fires devicechange as a side effect of getUserMedia (can happen the first time
-labels populate), one extra rebuild occurs — harmless (~100-300ms re-acquire,
-self-limiting since the app already holds standing mic permission, so steady
-state doesn't loop). Did NOT add device-list diffing to suppress it — not worth
-the complexity for a one-off extra rebuild.
+Still requires the user to grant Microphone + Accessibility + Input Monitoring to
+"GVoice" once (Input Monitoring won't auto-prompt; the hotkey is silent without it).
 
-Takes effect only after restarting GVoice (hidden dictation window must reload
-the new preload + dictation.js). Parity 5/5 still pass.
+## Mic entitlement fix (2026-06-02)
+Root cause of "not asking for microphone": packaged app was signed with hardened
+runtime ON but WITHOUT com.apple.security.device.audio-input, so the renderer was
+blocked from the mic before macOS could prompt (TCC had no Microphone row, while
+Accessibility + ListenEvent for com.purr.gvoice were granted=2).
+Fix: build/entitlements.mac.plist (+ .inherit.plist) with audio-input + cs.* keys;
+package.json mac: hardenedRuntime true + entitlements/entitlementsInherit. Rebuilt,
+reinstalled. Accessibility/Input-Monitoring grants persisted (same bundle id+cert).
+Mic now prompts on first dictation.
+
+## Typing fix — packaged paste (2026-06-02)
+After mic worked, dictation transcribed fine but paste threw:
+"Cannot find module '@jimp/custom'". Cause: importing @nut-tree-fork/nut-js
+eagerly loads jimp; electron-builder + pnpm bundled jimp but not its @jimp/*
+sub-deps (pnpm-nesting collection gap). Rather than fight the bundler / reinstall,
+src/typing.js now: (1) sends ⌘V on macOS via /usr/bin/osascript (System Events
+keystroke) — no native dep; (2) imports nut-js lazily, only for the non-clipboard
+type-each-char path and non-macOS paste. Verified: full dictation types text in
+the packaged app. New one-time prompt on macOS: "GVoice wants to control System
+Events" (Automation) — must be allowed once.
+Note: on a packaged WINDOWS build the lazy nut-js path would still hit the jimp
+gap; revisit if/when Windows is packaged (hoist node_modules or osascript-equiv).

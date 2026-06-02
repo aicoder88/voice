@@ -1,0 +1,116 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Your dictionary</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #14181e;
+        color: #e7eef5;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+      }
+      body { display: flex; flex-direction: column; }
+      header { padding: 18px 20px 12px; }
+      h1 { font-size: 16px; margin: 0 0 6px; }
+      p.lede { margin: 0; color: #9fb0c0; font-size: 12.5px; line-height: 1.45; }
+      .add { display: flex; gap: 8px; padding: 0 20px 14px; }
+      #word {
+        flex: 1; min-width: 0;
+        background: #1d232b; color: #fff;
+        border: 1px solid #2c3540; border-radius: 9px;
+        padding: 9px 11px; font: inherit; outline: none;
+      }
+      #word:focus { border-color: #4aa3ff; }
+      #word::placeholder { color: #6b7986; }
+      button {
+        font: inherit; font-weight: 600; border: 0; border-radius: 9px;
+        padding: 9px 15px; cursor: pointer;
+      }
+      .primary { background: #34d399; color: #06210f; }
+      .primary:hover { background: #4ae3aa; }
+      .list { flex: 1; overflow: auto; padding: 0 20px 18px; }
+      .empty { color: #6b7986; font-size: 12.5px; padding: 8px 2px; }
+      ul { list-style: none; margin: 0; padding: 0; }
+      li {
+        display: flex; align-items: center; justify-content: space-between;
+        gap: 10px; padding: 9px 12px; margin-bottom: 6px;
+        background: #1d232b; border-radius: 9px;
+      }
+      li span { word-break: break-word; }
+      .del {
+        flex: none; background: rgba(255,255,255,0.08); color: #cdd8e3;
+        border-radius: 7px; padding: 4px 9px; font-size: 12px; font-weight: 600;
+      }
+      .del:hover { background: rgba(255, 90, 90, 0.28); color: #fff; }
+      .count { color: #6b7986; font-size: 11.5px; padding: 2px 2px 10px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Your dictionary</h1>
+      <p class="lede">
+        Add names and made-up words GVoice should spell exactly — brands, people, coined terms.
+        It nudges every speech engine toward them, so they come out right instead of being guessed at.
+      </p>
+    </header>
+
+    <div class="add">
+      <input id="word" type="text" autocomplete="off" spellcheck="false"
+             placeholder="Type a word, press Enter (or paste several, comma-separated)" />
+      <button class="primary" id="addBtn" type="button">Add</button>
+    </div>
+
+    <div class="list">
+      <div class="count" id="count"></div>
+      <ul id="items"></ul>
+      <div class="empty" id="empty" style="display:none">Nothing here yet. Add your first word above.</div>
+    </div>
+
+    <script>
+      const input = document.getElementById("word");
+      const addBtn = document.getElementById("addBtn");
+      const items = document.getElementById("items");
+      const empty = document.getElementById("empty");
+      const countEl = document.getElementById("count");
+
+      function render(words) {
+        words = Array.isArray(words) ? words : [];
+        items.textContent = "";
+        empty.style.display = words.length ? "none" : "block";
+        countEl.textContent = words.length
+          ? words.length + (words.length === 1 ? " word" : " words")
+          : "";
+        for (const w of words) {
+          const li = document.createElement("li");
+          const span = document.createElement("span");
+          span.textContent = w;
+          const del = document.createElement("button");
+          del.className = "del";
+          del.type = "button";
+          del.textContent = "Remove";
+          del.addEventListener("click", async () => render(await window.dictBridge.remove(w)));
+          li.append(span, del);
+          items.append(li);
+        }
+      }
+
+      async function addWords() {
+        const text = input.value.trim();
+        if (!text) return;
+        input.value = "";
+        render(await window.dictBridge.add(text));
+        input.focus();
+      }
+
+      addBtn.addEventListener("click", addWords);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") addWords(); });
+
+      window.dictBridge.list().then(render);
+      input.focus();
+    </script>
+  </body>
+</html>

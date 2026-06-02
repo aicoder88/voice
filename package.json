@@ -30,13 +30,30 @@
       "main.js",
       "preload.cjs",
       "preload-pill.cjs",
+      "preload-vocab.cjs",
+      "preload-dictionary.cjs",
+      "preload-splash.cjs",
       "server.js",
       "realtime-relay.js",
       "src/**/*",
       "public/**/*",
       "package.json"
     ],
+    "icon": "build/icon.png",
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "target": "dir",
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.inherit.plist",
+      "extendInfo": {
+        "LSUIElement": true,
+        "NSMicrophoneUsageDescription": "GVoice records while you hold the dictation key, then types out what you said."
+      }
+    },
     "win": {
+      "icon": "build/icon.png",
       "target": "nsis"
     }
   }

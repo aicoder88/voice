@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sendToClient, wrapWav } from "./_shared.js";
+import * as vocab from "../vocab.js";
 
 const SAMPLE_RATE = 24000;
 // Anything shorter than this is almost certainly a misfire (the user tapped
@@ -105,12 +106,20 @@ let promptLogged = false;
  */
 async function loadPrompt() {
   const { raw, source } = await resolvePrompt();
-  const truncated = raw.length > MAX_PROMPT_CHARS;
-  const prompt = truncated ? raw.slice(0, MAX_PROMPT_CHARS) : raw;
+  // Fold in the user's custom dictionary (the words added via the cursor
+  // pop-up) on top of the hand-curated seed prompt. Re-read every commit so a
+  // just-added word biases the very next dictation.
+  let combined = raw;
+  try {
+    const addition = vocab.whisperPromptAddition();
+    if (addition) combined = combined ? combined + " " + addition : addition;
+  } catch {}
+  const truncated = combined.length > MAX_PROMPT_CHARS;
+  const prompt = truncated ? combined.slice(0, MAX_PROMPT_CHARS) : combined;
   if (!promptLogged) {
     promptLogged = true;
-    const note = truncated ? " (truncated from " + raw.length + ")" : "";
-    console.error("[whisper-local] vocab prompt: " + prompt.length + " chars from " + source + note);
+    const note = truncated ? " (truncated from " + combined.length + ")" : "";
+    console.error("[whisper-local] vocab prompt: " + prompt.length + " chars from " + source + " + custom dictionary" + note);
   }
   return prompt;
 }

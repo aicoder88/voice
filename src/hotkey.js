@@ -30,6 +30,13 @@ const require = createRequire(import.meta.url);
 const POLL_INTERVAL_MS = 33;
 const CTRL_TAP_WINDOW_MS = 300;
 
+// Edge traces (press/release/tap) are useful when debugging a stuck hotkey but
+// noisy in normal use. Gate them behind GVOICE_DEBUG; real errors stay loud.
+const VERBOSE = process.env.GVOICE_DEBUG === "1" || process.env.GVOICE_DEBUG === "true";
+function debug(/** @type {any[]} */ ...args) {
+  if (VERBOSE) console.error(...args);
+}
+
 /**
  * @typedef {{
  *   onPress?: (key: "alt") => void,
@@ -68,14 +75,14 @@ function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
 
     if (altNow && !altWas) {
       if (ctrlDownAt !== null) ctrlChorded = true;
-      console.error("[hotkey] PRESS alt");
+      debug("[hotkey] PRESS alt");
       try {
         onPress?.("alt");
       } catch (error) {
         console.error("hotkey onPress error:", error);
       }
     } else if (!altNow && altWas) {
-      console.error("[hotkey] RELEASE alt");
+      debug("[hotkey] RELEASE alt");
       try {
         onRelease?.("alt");
       } catch (error) {
@@ -93,7 +100,7 @@ function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
       ctrlDownAt = null;
       ctrlChorded = false;
       if (wasTap) {
-        console.error("[hotkey] TAP ctrl (held=" + held + "ms)");
+        debug("[hotkey] TAP ctrl (held=" + held + "ms)");
         try {
           onToggleLanguage?.();
         } catch (error) {
@@ -178,7 +185,7 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
       if (ctrlDownAt !== null) ctrlSawOtherKey = true;
       if (altHeld) return; // auto-repeat
       altHeld = true;
-      console.error("[hotkey] PRESS alt (keycode=" + code + ")");
+      debug("[hotkey] PRESS alt (keycode=" + code + ")");
       try {
         onPress?.("alt");
       } catch (error) {
@@ -202,7 +209,7 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
     if (ALT_KEYCODES.has(code)) {
       if (!altHeld) return;
       altHeld = false;
-      console.error("[hotkey] RELEASE alt (keycode=" + code + ")");
+      debug("[hotkey] RELEASE alt (keycode=" + code + ")");
       try {
         onRelease?.("alt");
       } catch (error) {
@@ -217,7 +224,7 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
       ctrlDownAt = null;
       ctrlSawOtherKey = false;
       if (wasTap) {
-        console.error("[hotkey] TAP ctrl (held=" + held + "ms)");
+        debug("[hotkey] TAP ctrl (held=" + held + "ms)");
         try {
           onToggleLanguage?.();
         } catch (error) {

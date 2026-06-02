@@ -1,45 +1,76 @@
-# Continuation — audio backup + retry/play safety net
+# Continuation — custom dictionary + polish pass
 
-Status: COMPLETE and tested (parity suite + backup e2e all pass). Not committed
+Status: COMPLETE. Unit tests (18/18) + parity (5/5) pass. Not committed
 (awaiting user "ok"/"push").
 
 ## What this added
-When a dictation fails to transcribe, the captured audio is saved as a WAV and
-a pop-up appears with **Retry** (re-transcribe the same audio) and **Play**
-(listen back). A long dictation is never silently lost.
+GVoice now learns the names/jargon it mishears. After a successful dictation it
+looks for an unusual capitalized name in what it typed, and (macOS/Linux) watches
+~12s for the user hand-fixing a word. Either triggers a small pop-up at the
+cursor: *Add "X" to your dictionary?* Added words bias every engine. Asked once
+per word; "No thanks" is remembered forever.
+
+## Follow-up added this turn (the bootstrap fix)
+User feedback: "it tends to guess at words I'm making up — there is no pop-up."
+Root cause: the cursor pop-up can only confirm what was transcribed, but a
+made-up word is transcribed as a *different* real word (usually lowercase, so it
+isn't even flagged as a name candidate) — so the pop-up can never capture it.
+The only fix is seeding the word BEFORE transcription so the engine biases
+toward it. Added a **dictionary manager window** (tray → "Manage dictionary…")
+to type words in directly + review/remove them. Replaced the raw-JSON
+"Edit dictionary…" tray item (and removed now-dead vocab.ensureFile /
+getStorePath). New files: public/dictionary.html, preload-dictionary.cjs. New in
+main.js: openDictionaryWindow + ipcMain.handle vocab:list / vocab:add-many /
+vocab:remove. New in vocab.js: removeTerm. package.json: preload-dictionary.cjs
+in build.files.
 
 ## Files
-- src/backup.js (new) — saveBackup / readBackupPcm / deleteBackup /
-  pruneBackups / buildRelayUrl / retranscribe (WS replay through the relay).
-- src/providers/_shared.js — now owns wrapWav (deduped from whisper-local.js).
-- src/providers/whisper-local.js — imports wrapWav from _shared.
-- public/dictation.js — accumulates recordedChunks (pre-roll + streamed),
-  reportFailure(), 20s failure watchdog, gotTerminalEvent, socket-identity guard.
-- public/backup-error.html (new) — the pop-up UI.
-- preload.cjs — added reportFailure bridge method.
-- preload-backup.cjs (new) — backupBridge: retry() + close().
-- main.js — processTranscript() refactor; IPC dictation:failure /
-  backup:retry / backup:close; openBackupWindow(); boot-time prune; recordingsDir.
-- server.js — serves /recordings/*.wav from recordingsDir with traversal guard.
-- package.json — added preload-backup.cjs to build.files.
+- src/vocab.js (NEW) — the dictionary store + brains. init/addTerm/removeTerm/dismissTerm/
+  isKnown/isDismissed, detectCandidates (mid-sentence capitalized, unknown,
+  uncommon), isLikelyCorrection (Levenshtein ≤2 near-miss), wordsOf, and the
+  three provider formatters (whisperPromptAddition / deepgramKeyterms /
+  openaiPromptAddition). Store: userData/custom-vocab.json (repo-local default
+  for non-Electron hosts). Seeds the "known" set from models/vocab.txt too.
+- src/correction-watch.js (NEW) — uiohook keydown/mousedown listener, armed per
+  dictation, reconstructs hand-typed words (US-letter layout + shift), no-op on
+  Windows. Privacy: only acts while armed, only the in-progress word in memory.
+- public/vocab-prompt.html (NEW) + preload-vocab.cjs (NEW) — the cursor pop-up.
+- main.js — vocab.init at boot; createVocabWindow / positionVocabAtCursor /
+  showVocabPrompt / hideVocab / maybeSuggestVocab; correctionWatcher wiring
+  (arm on success, disarm on next press); IPC vocab:add/dismiss/hide; tray
+  "Edit dictionary…"; GVOICE_DEBUG-gated debug() replacing chatty info logs.
+- src/providers/deepgram.js — appends nova-3 `keyterm` (or `keywords`) per
+  custom term, English-only (alongside smart_format guard).
+- src/providers/whisper-local.js — folds whisperPromptAddition() into the
+  initial prompt every commit.
+- src/providers/openai.js — adds transcription `prompt` from the dictionary.
+- src/hotkey.js — PRESS/RELEASE/TAP traces gated behind GVOICE_DEBUG.
+- package.json — preload-vocab.cjs added to build.files.
+- README.md — rewritten for GVoice. SETUP.md + .env.example — dictionary section
+  + GVOICE_CORRECTION_WATCH_MS / GVOICE_DEBUG.
+- debug.log — deleted (gitignored).
 
-## Failure detection (three shapes; silence is NOT a failure)
-1. error/local.error frame → reportFailure immediately.
-2. socket not OPEN at commit → reportFailure (lost connection).
-3. no terminal frame within DICTATION_FAILURE_MS (20s) → reportFailure (hung).
-A `completed` frame with empty transcript = silence gate, sets gotTerminalEvent,
-no pop-up.
+## Trigger model (per user's answers)
+- "Only likely-misheard names": detectCandidates is conservative (mid-sentence
+  capitalized, ≥3 chars, not common, not known/dismissed).
+- All three engines biased.
+- "Corrected" = BOTH the cleanup-diff cases (a known word stays known) AND
+  watching manual edits via the keystroke watcher (user chose the fuller path).
 
 ## Config / env
-- DICTATION_FAILURE_MS (default 20000) — hang watchdog.
-- BACKUP_RETENTION_DAYS (default 7) — prune age.
-- Recordings dir: userData/recordings/.
+- GVOICE_CORRECTION_WATCH_MS (default 12000; 0 disables manual-edit watch).
+- GVOICE_DEBUG=1 echoes per-event traces to console (always in debug.log).
 
 ## Tests
-- npm run test:parity — all 5 pass.
-- Backup e2e (WAV round-trip, prune, traversal guard, live retranscribe via
-  whisper-local) verified during the build; script was throwaway.
+- node /tmp/vocab-test.mjs — 18 assertions (candidate detection, correction
+  match, add/dismiss roundtrip, provider formatting). Throwaway; re-derive from
+  src/vocab.js exports if needed.
+- node --test scripts/parity/dictation-flow.test.js — 5/5 pass.
 
 ## Known limitations (see notes.md)
-- Retry uses the env STT provider; Play always recovers audio regardless.
-- Retry-after-restart works (reads WAV from disk).
+- Manual-edit watcher is macOS/Linux only and US-letter-layout (names are ASCII
+  in practice); Windows still gets transcript-based suggestions.
+- Deepgram keyterm boosting is English-only (Deepgram limitation); Whisper
+  biasing works in any language.
+- Caret position isn't available cross-app on macOS, so the pop-up anchors to
+  the mouse cursor, not the text caret.

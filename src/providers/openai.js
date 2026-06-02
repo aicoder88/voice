@@ -15,6 +15,7 @@
 
 import WebSocket from "ws";
 import { sendToClient, TRANSCRIPTION_ONLY_MODELS, forwardUnexpectedResponse } from "./_shared.js";
+import * as vocab from "../vocab.js";
 
 /**
  * @param {WebSocket} clientSocket
@@ -35,6 +36,12 @@ export function attach(clientSocket, requestUrl, { apiKey, model, instructions }
 
   openaiSocket.on("open", () => {
     sendToClient(clientSocket, { type: "local.status", status: "connected", model: sessionModel, provider: "openai" });
+    // Bias the transcription model toward the user's custom dictionary, if any.
+    let vocabPrompt = "";
+    try { vocabPrompt = vocab.openaiPromptAddition(); } catch {}
+    const transcription = vocabPrompt
+      ? { model: transcriptionModel, prompt: vocabPrompt }
+      : { model: transcriptionModel };
     const sessionPayload = isTranscribeOnly
       ? {
           type: "session.update",
@@ -44,7 +51,7 @@ export function attach(clientSocket, requestUrl, { apiKey, model, instructions }
               input: {
                 format: { type: "audio/pcm", rate: 24000 },
                 turn_detection: null,
-                transcription: { model: transcriptionModel }
+                transcription
               }
             }
           }
