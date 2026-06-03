@@ -1,8 +1,9 @@
 allowBuilds:
-  electron-winstaller: set this to true or false
-  koffi: set this to true or false
-  uiohook-napi: set this to true or false
+  electron-winstaller: true
+  koffi: true
+  uiohook-napi: true
 onlyBuiltDependencies:
   - electron
+  - electron-winstaller
   - koffi
   - uiohook-napi

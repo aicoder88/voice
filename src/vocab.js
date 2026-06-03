@@ -179,73 +179,13 @@ export function dismissTerm(term) {
   }
 }
 
-// --- Candidate detection ---------------------------------------------------
-
-// Common capitalized words that legitimately appear mid-sentence and should
-// never be offered as dictionary entries. The persistent dismissed-list backs
-// this up for anything that slips through (each word is asked at most once).
-const COMMON_CAPITALIZED = new Set(
-  [
-    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
-    "january", "february", "march", "april", "may", "june", "july", "august",
-    "september", "october", "november", "december",
-    "english", "french", "spanish", "german", "italian", "croatian", "serbian",
-    "bosnian", "european", "american",
-    "god", "internet", "mr", "mrs", "ms", "dr", "prof", "sir",
-    "api", "url", "html", "css", "json", "pdf", "usa", "uk", "eu", "ceo",
-    "i'm", "i'll", "i've", "i'd"
-  ]
-);
+// --- Word tokenization -----------------------------------------------------
 
 const WORD_RE = /[A-Za-zÀ-ɏ][A-Za-zÀ-ɏ'’-]*/g;
 
 /** All word tokens in a string. @param {string} text */
 export function wordsOf(text) {
   return String(text || "").match(WORD_RE) || [];
-}
-
-/**
- * Find "likely-misheard name" candidates in already-typed text: words that are
- * capitalized mid-sentence (so almost certainly proper nouns or jargon), at
- * least 3 letters, not common, and not already known or dismissed. Returns up
- * to 3, in order of appearance.
- *
- * @param {string} text
- * @returns {string[]}
- */
-export function detectCandidates(text) {
-  if (!text) return [];
-  const known = knownSet();
-  const dismissed = dismissedSet();
-  const out = [];
-  const seen = new Set();
-  // Fresh regex instance: WORD_RE is global, and sharing its lastIndex with
-  // wordsOf() would be a footgun.
-  const re = new RegExp(WORD_RE.source, "g");
-  let m;
-  while ((m = re.exec(text))) {
-    const word = m[0];
-    if (word.length < 3) continue;
-    // Must start with a real uppercase letter. (A naïve [A-ZÀ-ſ] range also
-    // matches lowercase accented letters like ž/č/đ, which would flag ordinary
-    // lowercase Croatian words — the app's default language.)
-    if (!/^\p{Lu}/u.test(word)) continue;
-
-    // Sentence-initial words are capitalized for grammar, not because they're
-    // names — skip them. Look back past whitespace to the previous glyph.
-    let i = m.index - 1;
-    while (i >= 0 && /\s/.test(text[i])) i--;
-    const prev = i >= 0 ? text[i] : "";
-    if (i < 0 || ".!?…:\"'(—–-".includes(prev)) continue;
-
-    const lower = word.toLowerCase();
-    if (COMMON_CAPITALIZED.has(lower) || known.has(lower) || dismissed.has(lower)) continue;
-    if (seen.has(lower)) continue;
-    seen.add(lower);
-    out.push(word);
-    if (out.length >= 3) break;
-  }
-  return out;
 }
 
 /**

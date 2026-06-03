@@ -73,12 +73,10 @@
 
       window.vocabBridge.onPrompt((data) => {
         term = (data && data.term) || "";
-        const reason = data && data.reason;
         headEl.innerHTML = "Add <b>“" + esc(term) + "”</b> to your dictionary?";
-        subEl.textContent =
-          reason === "correction"
-            ? "Looks like you fixed this. Save it so it's typed right next time."
-            : "Save it so GVoice spells it right next time you say it.";
+        // The pop-up now fires only when you hand-fix a word GVoice mis-heard,
+        // so the copy always speaks to that.
+        subEl.textContent = "Looks like you fixed this. Save it so it's typed right next time.";
       });
 
       addBtn.addEventListener("click", () => window.vocabBridge.add(term));

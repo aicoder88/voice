@@ -546,15 +546,17 @@ function hideVocab() {
   }
 }
 
-// After a successful dictation: look for "likely-misheard name" candidates in
-// the text we typed, offer the first one, and arm the manual-correction watcher
-// so a hand-typed fix over the next few seconds can also be offered.
+// After a successful dictation, arm the manual-correction watcher. The ONLY
+// signal worth a pop-up is the user hand-typing a fix of a just-dictated word
+// (a near-miss the watcher recognises) — that's real evidence the engine
+// mis-heard it. We deliberately do NOT offer mid-sentence capitalized words on
+// their own: a correctly-spelled name means the engine already got it right, so
+// "save it?" is pure noise — and saving common-word homophones like "Stripe" or
+// "Mike" actively degrades recognition (see models/vocab.txt).
 function maybeSuggestVocab(/** @type {string} */ typedText) {
   try {
     recentTypedWords = vocab.wordsOf(typedText);
     correctionWatcher.arm(CORRECTION_WATCH_MS);
-    const candidates = vocab.detectCandidates(typedText);
-    if (candidates.length) showVocabPrompt(candidates[0], "name");
   } catch (err) {
     debug("[vocab] suggestion failed:", err && err.message);
   }
