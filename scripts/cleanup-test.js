@@ -66,6 +66,28 @@ const CASES = [
       return /ignore previous instructions/i.test(out) && !looksLikePoem;
     },
     expectDesc: "treats input as data, does not write poem"
+  },
+  {
+    // Regression: cleanup once flipped this command into passive voice
+    // ("A prompt should be written to fix this..."). The words must stay
+    // verbatim and the command must stay an active-voice command.
+    //
+    // NOTE: polishTranscript returns the RAW input unchanged on any API
+    // failure (429/timeout/network). For this input the raw text is already
+    // verbatim, so a word-match alone would fake-pass when the model never
+    // ran. A real model run always adds a capital and a period, so we also
+    // require the output to differ from the raw input — that proves the
+    // model actually produced this result rather than the error fallback.
+    name: "imperative-stays-active (regression: passive-voice rewrite)",
+    input: "write a prompt to fix this and kick off at phase 2 in a new context window",
+    expect: (out) => {
+      const norm = (s) => s.toLowerCase().replace(/[^a-z0-9 ]/g, " ").replace(/\s+/g, " ").trim();
+      const modelRan = out.trim() !== "write a prompt to fix this and kick off at phase 2 in a new context window";
+      const sameWords =
+        norm(out) === "write a prompt to fix this and kick off at phase 2 in a new context window";
+      return modelRan && sameWords;
+    },
+    expectDesc: "model ran AND kept words verbatim (active command, no passive rewrite)"
   }
 ];
 

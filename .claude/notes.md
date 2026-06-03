@@ -141,3 +141,43 @@ the packaged app. New one-time prompt on macOS: "GVoice wants to control System
 Events" (Automation) — must be allowed once.
 Note: on a packaged WINDOWS build the lazy nut-js path would still hit the jimp
 gap; revisit if/when Windows is packaged (hoist node_modules or osascript-equiv).
+
+## Polish pass reworded speech — passive-voice fix (2026-06-03)
+Symptom: spoken commands occasionally came out reworded, e.g. "write a prompt to
+fix this..." → "A prompt should be written to fix this...". STT was faithful; the
+LLM polish pass (src/cleanup.js, polishTranscript, groq llama-3.3-70b) was doing
+it. Intermittent (could not reproduce on the exact phrase in 5+ runs).
+Root cause: SYSTEM_PROMPT framed the job as "polished written text" + "be
+assertive about structure" with NO rule preserving the speaker's exact words,
+grammatical voice, or sentence mood — so the model occasionally paraphrased.
+Fix: added a top-priority "PRESERVE THE SPEAKER'S WORDS" section (forbids
+paraphrase / active→passive / mood changes) + one reinforcing bullet in
+PRESERVATION (strict). Recast the opener as "transcriptionist, NOT an editor"
+and scoped "be assertive about structure" to layout only. Regression case added
+to scripts/cleanup-test.js.
+
+Review-gate decisions (merged):
+- Test was fake-green: polishTranscript falls back to RAW text on any API error
+  (429/timeout), and raw == verbatim, so the regression case passed even when the
+  model never ran. Now it also asserts output != raw input (a real run adds a
+  cap + period) so a rate-limited run FAILS honestly instead of green.
+- Prompt self-contradiction: a "never reorder/drop words" supreme rule fought the
+  list-formatting the same prompt still requires (and 2 existing tests assert).
+  Added an explicit layout carve-out for the enumeration→list transform.
+- Trimmed 3 overlapping bullets down to the load-bearing voice/mood/verbatim ones.
+
+Rejected (surfaced, not done):
+- Deterministic word-preservation guard (compare content words, fall back to raw
+  on divergence). No SIMPLE version is both safe and effective: list/filler edits
+  legitimately drop/reorder words, and this specific passive flip was a net +1
+  word (17→18) — indistinguishable from a one-word transcription fix. A guard
+  strict enough to catch it would discard real cleanups. Left as opt-in follow-up.
+- Tightening the needsCleanup gate so short single-clause commands skip the LLM
+  (just add a period locally). Reduces risk + latency, but changes capitalization
+  behavior — a product/taste call for the user, not a unilateral change.
+
+Verification: regression case PASS with modelRan=true on a clean window; 6/6
+imperative phrases kept verbatim live; list/filler/prose/injection cases still
+pass; parity 5/5. Note: the inline-numbered-enumeration test is brittle (exact
+blank-line match on a stochastic model) and flakes ~occasionally — pre-existing,
+not caused by this change (passed 3/3 on isolated re-run).
