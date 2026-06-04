@@ -113,7 +113,7 @@
       // Auto-hide for result states, paused while the pointer is over the pill
       // so there's time to click Copy / Open. A clean success vanishes fast
       // (it worked, get out of the way); an error lingers so the user can act.
-      const HIDE_BY_STATE = { success: 2000, error: 8000 };
+      const HIDE_BY_STATE = { success: 2000, error: 30000 };
       let currentHideMs = 8000;
       let hideTimer = null;
       function clearHide() { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } }
@@ -152,7 +152,7 @@
       });
 
       // Keep the pill alive while the user is reaching for a button; on leave,
-      // re-arm with the state's own timeout (2s success / 8s error).
+      // re-arm with the state's own timeout (2s success / 30s error).
       document.body.addEventListener("mouseenter", clearHide);
       document.body.addEventListener("mouseleave", () => {
         const s = document.body.getAttribute("data-state");

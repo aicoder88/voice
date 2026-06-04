@@ -39,7 +39,8 @@ import { DictationSession } from "./src/dictation-session.js";
 import { wrapWav } from "./src/providers/_shared.js";
 import * as vocab from "./src/vocab.js";
 import { createCorrectionWatcher } from "./src/correction-watch.js";
-import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused } from "./src/foreground.js";
+import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, focusedFieldValue } from "./src/foreground.js";
+import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
 import { appendFileSync, statSync, renameSync, unlinkSync, existsSync } from "node:fs";
 import { writeFile as writeFileAsync, readdir, unlink as unlinkAsync, rm as rmAsync, mkdir as mkdirAsync } from "node:fs/promises";
 
@@ -432,7 +433,9 @@ function showPillResult(
   currentRecordingPath = recordingPath;
   setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath });
   pillWindow?.showInactive();
-  armPillSafetyHide(12000);
+  // Errors get a long backstop: the renderer keeps the error pill up 30s so a
+  // missed paste can still be copied; success hides quickly as before.
+  armPillSafetyHide(state === "error" ? 45000 : 12000);
 }
 
 let pillSafetyTimer = null;
@@ -776,11 +779,30 @@ async function processTranscript(transcript, restoreHwnd = null) {
     typed = false;
     console.error("[main] typeText failed:", error && (error.stack || error.message));
   }
-  const pasted =
+  let pasted =
     typed &&
     !(restoreHwnd != null && restored === false) &&
     fieldFocused !== false;
-  debug("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ", fieldFocused=" + fieldFocused + ", pasted=" + pasted + ")");
+  // Post-paste verification (macOS, best-effort): re-read the focused field and
+  // check our text actually appeared in it. Only DOWNGRADE on a readable string
+  // that's missing the text — null means "couldn't verify" (web areas, secure
+  // fields), which must never turn a good paste into a false error.
+  let verified = null;
+  if (pasted) {
+    await new Promise((resolve) => setTimeout(resolve, 150)); // let the paste settle
+    const fieldValue = focusedFieldValue();
+    if (typeof fieldValue === "string") {
+      // Normalize what apps auto-substitute (smart quotes, em-dashes, NBSP,
+      // collapsed whitespace) so autocorrect can't turn a good paste into a
+      // false error.
+      const norm = (/** @type {string} */ s) =>
+        s.replace(/[‘’]/g, "'").replace(/[“”]/g, '"')
+         .replace(/[–—]/g, "-").replace(/\s+/g, " ").trim();
+      verified = norm(fieldValue).includes(norm(textToType));
+      if (!verified) pasted = false;
+    }
+  }
+  debug("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ", fieldFocused=" + fieldFocused + ", verified=" + verified + ", pasted=" + pasted + ")");
   dlog("typed", { len: textToType.length, ms: Date.now() - tType, fieldFocused, pasted });
   return { text: textToType, pasted };
 }
@@ -855,6 +877,17 @@ function setupIpc() {
         // Success only when we're confident the text was pasted somewhere;
         // otherwise show Error so the user can Copy it / open the recording.
         showPillResult(result.pasted ? "success" : "error", result.text, recordingPath);
+        // Keep the last 50 dictations on disk and in the tray menu, so a
+        // missed paste is recoverable even after the pill is gone.
+        recordTranscript(result.text, result.pasted);
+        rebuildTrayMenu();
+        // Failed paste: also put the text on the clipboard so it's recoverable
+        // with ⌘V even if the pill is missed. Delayed past typeText's 250ms
+        // clipboard restore, which would otherwise overwrite it.
+        if (!result.pasted) {
+          const lostText = result.text;
+          setTimeout(() => { try { clipboard.writeText(lostText); } catch {} }, 450);
+        }
         // Offer to teach the dictionary any likely-misheard names, and start
         // watching for a hand-typed correction. Only when the text actually
         // landed somewhere.
@@ -863,6 +896,10 @@ function setupIpc() {
     } catch (error) {
       console.error("[main] Typing failed:", error.stack || error.message);
       showPillResult("error", text, recordingPath);
+      // Cleanup never ran on this path — at least strip Whisper noise tokens
+      // so the history entry matches the others as closely as possible.
+      recordTranscript(stripWhisperNoiseTokens(text.trim()) || text, false);
+      rebuildTrayMenu();
     } finally {
       dictation.done();
     }
@@ -965,8 +1002,41 @@ function showMicWarning(/** @type {string} */ message) {
 function createTray() {
   tray = new Tray(makeTrayIcon(getCurrentLanguage()));
   updateTrayTooltip();
+  rebuildTrayMenu();
+}
+
+// The "Recent dictations" submenu changes after every dictation, and Electron
+// tray menus are static once set — so the whole menu is rebuilt on demand.
+function rebuildTrayMenu() {
+  if (!tray) return;
+
+  // One submenu row per saved dictation, newest first: time + a preview.
+  // Clicking a row copies the full text to the clipboard.
+  const historyItems = getHistory().map((entry) => {
+    const time = new Date(entry.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+    // Newlines break NSMenu labels (display cuts at the first one) — flatten.
+    const flat = entry.text.replace(/\s+/g, " ").trim();
+    const preview = flat.length > 60 ? flat.slice(0, 60) + "…" : flat;
+    return {
+      label: `${time}${entry.pasted ? "" : " ⚠"}  ${preview}`,
+      click: () => clipboard.writeText(entry.text)
+    };
+  });
 
   const menu = Menu.buildFromTemplate([
+    {
+      label: "Recent dictations",
+      enabled: historyItems.length > 0,
+      submenu: [
+        ...historyItems,
+        { type: /** @type {const} */ ("separator") },
+        {
+          label: "Open history file…",
+          click: () => { const p = getHistoryPath(); if (p) shell.showItemInFolder(p); }
+        }
+      ]
+    },
+    { type: "separator" },
     {
       label: serverPort ? `Relay: http://localhost:${serverPort}` : "Relay: not running",
       enabled: !!serverPort,
@@ -1051,6 +1121,9 @@ app.whenReady().then(async () => {
   // isn't bundled into the read-only app. The providers read it on every
   // connection; the cursor pop-up writes to it.
   vocab.init(join(app.getPath("userData"), "custom-vocab.json"));
+  // Last-50 dictation history, persisted across restarts; shown in the tray's
+  // "Recent dictations" menu. Loaded before the tray builds its first menu.
+  await initHistory();
 
   setSplashStatus("Starting the local relay…");
   await bootRelayServer();
@@ -1103,10 +1176,14 @@ app.on("window-all-closed", (event) => {
   event.preventDefault();
 });
 
-app.on("before-quit", () => {
+app.on("before-quit", async () => {
   isQuitting = true;
   if (hotkeyEngine && typeof hotkeyEngine.stop === "function") {
     try { hotkeyEngine.stop(); } catch {}
   }
   try { correctionWatcher.stop(); } catch {}
+  try {
+    const { stopWhisperServer } = await import("./src/providers/whisper-local.js");
+    stopWhisperServer();
+  } catch {}
 });

@@ -74,6 +74,10 @@ let AXIsProcessTrusted = null;
 let CFRelease = null;
 /** @type {((str: unknown, buf: Buffer, size: number, enc: number) => boolean) | null} */
 let CFStringGetCString = null;
+/** @type {((cf: unknown) => number) | null} */
+let CFGetTypeID = null;
+/** @type {(() => number) | null} */
+let CFStringGetTypeID = null;
 /** @type {unknown} */ let kAXFocusedUIElement = null;
 /** @type {unknown} */ let kAXRole = null;
 /** @type {unknown} */ let kAXValue = null;
@@ -91,6 +95,8 @@ if (isMac) {
       "bool CFStringGetCString(void *theString, _Out_ char *buffer, long bufferSize, uint32_t encoding)"
     );
     CFRelease = CF.func("void CFRelease(void *cf)");
+    CFGetTypeID = CF.func("unsigned long CFGetTypeID(void *cf)");
+    CFStringGetTypeID = CF.func("unsigned long CFStringGetTypeID(void)");
 
     AXUIElementCreateSystemWide = AX.func("void *AXUIElementCreateSystemWide(void)");
     AXUIElementCopyAttributeValue = AX.func(
@@ -160,6 +166,54 @@ export function isEditableFieldFocused() {
     }
   } catch (err) {
     console.error("[foreground] focus check failed:", err && err.message);
+    return null;
+  }
+}
+
+/**
+ * Read the text content (AXValue) of the currently-focused element, so a
+ * caller can verify a paste actually landed. Best-effort: many elements
+ * (web areas, secure fields, custom editors) don't expose a string value.
+ *
+ * @returns {string | null}  the field's text, or null if it can't be read —
+ *   callers must treat null as "couldn't verify", never as "paste failed".
+ */
+export function focusedFieldValue() {
+  if (!isMac || !AXUIElementCreateSystemWide || !AXUIElementCopyAttributeValue) return null;
+  try {
+    if (AXIsProcessTrusted && !AXIsProcessTrusted()) return null;
+    const systemWide = AXUIElementCreateSystemWide();
+    if (!systemWide) return null;
+    try {
+      const focusedOut = [null];
+      if (AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElement, focusedOut) !== 0) return null;
+      const focused = focusedOut[0];
+      if (!focused) return null;
+      try {
+        const valueOut = [null];
+        if (AXUIElementCopyAttributeValue(focused, kAXValue, valueOut) !== 0 || !valueOut[0]) return null;
+        try {
+          // AXValue isn't always a string (sliders/checkboxes return numbers).
+          // Calling CFStringGetCString on a non-string is undefined behavior,
+          // so type-check first.
+          if (!CFGetTypeID || !CFStringGetTypeID || CFGetTypeID(valueOut[0]) !== CFStringGetTypeID()) return null;
+          // Large enough for any realistic dictation target; CFStringGetCString
+          // returns false (→ null) if the value doesn't fit.
+          const buf = Buffer.alloc(256 * 1024);
+          if (!CFStringGetCString(valueOut[0], buf, buf.length, kCFStringEncodingUTF8)) return null;
+          const end = buf.indexOf(0);
+          return buf.toString("utf8", 0, end < 0 ? buf.length : end);
+        } finally {
+          CFRelease(valueOut[0]);
+        }
+      } finally {
+        CFRelease(focused);
+      }
+    } finally {
+      CFRelease(systemWide);
+    }
+  } catch (err) {
+    console.error("[foreground] field value read failed:", err && err.message);
     return null;
   }
 }
