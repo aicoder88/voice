@@ -164,6 +164,14 @@ let exitHandlerInstalled = false;
  * @param {string} [bin]
  * @returns {Promise<void>}
  */
+export function stopWhisperServer() {
+  if (whisperServerProc) {
+    try { whisperServerProc.kill("SIGTERM"); } catch {}
+    whisperServerProc = null;
+  }
+  whisperServerReady = null;
+}
+
 export function ensureWhisperServer(bin) {
   if (whisperServerReady) return whisperServerReady;
 
