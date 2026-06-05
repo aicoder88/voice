@@ -698,7 +698,9 @@ async function setupHotkey() {
       }
     });
     updateTrayTooltip();
-    const altLabel = process.platform === "darwin" ? "right Option (⌥)" : "right Alt";
+    const altLabel = process.platform === "darwin"
+      ? "right Option (⌥), left Ctrl+Cmd, or mouse back button"
+      : "right Alt";
     console.log(`Global hotkeys active: hold ${altLabel} to dictate, tap right Ctrl to toggle hr/en.`);
   } catch (error) {
     console.error("Failed to start global hotkey:", error.message);

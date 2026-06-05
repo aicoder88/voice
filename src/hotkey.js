@@ -11,13 +11,16 @@
 //   CPU: negligible (two GetAsyncKeyState calls per tick).
 //
 // macOS / Linux:
-//   Event-based via uiohook-napi. Uses its global keydown/keyup stream and
-//   matches right-Alt (hold-to-talk) and right-Ctrl (tap-to-toggle) by
-//   uiohook keycode. macOS requires Accessibility permission for the app to
-//   receive these events.
+//   Event-based via uiohook-napi. Uses its global keydown/keyup/mouse stream
+//   and matches three hold-to-talk triggers by uiohook keycode/button:
+//   right-Alt, left-Ctrl + left-Cmd held together, and the mouse "back"
+//   button. Right-Ctrl tap toggles language. macOS requires Accessibility
+//   permission for the app to receive these events.
 //
 // Both paths honor the same contract:
-//   - Right Alt = hold-to-talk. onPress on the down edge, onRelease on the up.
+//   - Hold-to-talk trigger(s): onPress on the down edge, onRelease on the up.
+//     On macOS several triggers feed one shared press/release state, so
+//     overlapping holds (e.g. mouse button + right Option) act as one press.
 //   - Right Ctrl tap (down + up within CTRL_TAP_WINDOW_MS, with no other key
 //     going down in between) fires onToggleLanguage. Holding right Ctrl, or
 //     pressing it as part of a chord, does NOT toggle.
@@ -124,9 +127,16 @@ function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
  * macOS / Linux implementation via uiohook-napi. Imported lazily so Windows
  * builds never pay for the native binding (and don't need it installed).
  *
- *   - Right Option (Alt) = hold-to-talk. We match against UiohookKey.AltRight
- *     and UiohookKey.AltGraph, plus the common raw scancodes (3640, 56) seen
- *     in older uiohook builds, filtering undefineds.
+ *   Hold-to-talk triggers (any of these, all feeding one shared press state):
+ *   - Right Option (Alt): UiohookKey.AltRight and UiohookKey.AltGraph, plus
+ *     the raw 3640 scancode seen in older uiohook builds.
+ *   - Left Ctrl + Left Cmd held together: the chord arms on the second key's
+ *     down edge and releases when either key comes up. Left-only, so the
+ *     right-side modifiers keep their existing meanings.
+ *   - Mouse "back" button (uiohook button 4): hold to talk, release to stop.
+ *     If a mouse-remapper app swallows the raw button, mapping the button to
+ *     a held Ctrl+Cmd keystroke triggers the chord path instead.
+ *
  *   - Right Control = tap-to-toggle. UiohookKey.CtrlR / ControlRight, plus
  *     the 3613 scancode fallback.
  *
@@ -172,25 +182,78 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
       3613
     ].filter((v) => typeof v === "number")
   );
+  // Left Ctrl / left Cmd for the chord trigger. Raw fallbacks: 29 (left Ctrl)
+  // and 3675 (left Meta/Cmd) match uiohook's scancode table.
+  const CTRL_L_KEYCODES = new Set(
+    [keyCodes.Ctrl, keyCodes.CtrlLeft, 29].filter((v) => typeof v === "number")
+  );
+  const CMD_L_KEYCODES = new Set(
+    [keyCodes.Meta, keyCodes.MetaLeft, 3675].filter((v) => typeof v === "number")
+  );
+  // uiohook mouse buttons: 1 left, 2 right, 3 middle, 4 back, 5 forward.
+  const MOUSE_BACK_BUTTON = 4;
 
-  let altHeld = false;
+  // All hold-to-talk triggers share one press/release state. Dictation starts
+  // when the first trigger goes down and stops when the last one is released,
+  // so overlapping holds can't double-start or cut each other off.
+  /** @type {Set<string>} */
+  const sourcesHeld = new Set();
+  function pressSource(/** @type {string} */ name) {
+    if (sourcesHeld.has(name)) return; // auto-repeat
+    const wasIdle = sourcesHeld.size === 0;
+    sourcesHeld.add(name);
+    if (!wasIdle) return;
+    debug("[hotkey] PRESS (" + name + ")");
+    try {
+      onPress?.("alt");
+    } catch (error) {
+      console.error("hotkey onPress error:", error);
+    }
+  }
+  function releaseSource(/** @type {string} */ name) {
+    if (!sourcesHeld.delete(name)) return;
+    if (sourcesHeld.size > 0) return;
+    debug("[hotkey] RELEASE (" + name + ")");
+    try {
+      onRelease?.("alt");
+    } catch (error) {
+      console.error("hotkey onRelease error:", error);
+    }
+  }
+
+  let ctrlLDown = false;
+  let cmdLDown = false;
   /** @type {number | null} */
   let ctrlDownAt = null;
   let ctrlSawOtherKey = false;
 
   const handleDown = (/** @type {any} */ event) => {
     const code = event && event.keycode;
+    // Self-heal stale chord state: if a keyup was swallowed (lock screen,
+    // emoji picker, focus churn) a flag can stay latched and a later lone
+    // Ctrl or Cmd press would start dictation. The event's live modifier
+    // mask says whether the key is really down right now — trust it.
+    if (event) {
+      if (ctrlLDown && event.ctrlKey === false) ctrlLDown = false;
+      if (cmdLDown && event.metaKey === false) cmdLDown = false;
+    }
+    // Any hold-to-talk key counts as "another key" if the right-Ctrl tap
+    // window is open, so a chord involving right Ctrl never toggles language.
     if (ALT_KEYCODES.has(code)) {
-      // Alt counts as "another key" if Ctrl's tap window is open.
       if (ctrlDownAt !== null) ctrlSawOtherKey = true;
-      if (altHeld) return; // auto-repeat
-      altHeld = true;
-      debug("[hotkey] PRESS alt (keycode=" + code + ")");
-      try {
-        onPress?.("alt");
-      } catch (error) {
-        console.error("hotkey onPress error:", error);
-      }
+      pressSource("alt");
+      return;
+    }
+    if (CTRL_L_KEYCODES.has(code)) {
+      if (ctrlDownAt !== null) ctrlSawOtherKey = true;
+      ctrlLDown = true;
+      if (cmdLDown) pressSource("ctrlCmd");
+      return;
+    }
+    if (CMD_L_KEYCODES.has(code)) {
+      if (ctrlDownAt !== null) ctrlSawOtherKey = true;
+      cmdLDown = true;
+      if (ctrlLDown) pressSource("ctrlCmd");
       return;
     }
     if (CTRL_R_KEYCODES.has(code)) {
@@ -207,14 +270,17 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
   const handleUp = (/** @type {any} */ event) => {
     const code = event && event.keycode;
     if (ALT_KEYCODES.has(code)) {
-      if (!altHeld) return;
-      altHeld = false;
-      debug("[hotkey] RELEASE alt (keycode=" + code + ")");
-      try {
-        onRelease?.("alt");
-      } catch (error) {
-        console.error("hotkey onRelease error:", error);
-      }
+      releaseSource("alt");
+      return;
+    }
+    if (CTRL_L_KEYCODES.has(code)) {
+      ctrlLDown = false;
+      releaseSource("ctrlCmd");
+      return;
+    }
+    if (CMD_L_KEYCODES.has(code)) {
+      cmdLDown = false;
+      releaseSource("ctrlCmd");
       return;
     }
     if (CTRL_R_KEYCODES.has(code)) {
@@ -235,8 +301,17 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
     }
   };
 
+  const handleMouseDown = (/** @type {any} */ event) => {
+    if (event && event.button === MOUSE_BACK_BUTTON) pressSource("mouseBack");
+  };
+  const handleMouseUp = (/** @type {any} */ event) => {
+    if (event && event.button === MOUSE_BACK_BUTTON) releaseSource("mouseBack");
+  };
+
   uIOhook.on("keydown", handleDown);
   uIOhook.on("keyup", handleUp);
+  uIOhook.on("mousedown", handleMouseDown);
+  uIOhook.on("mouseup", handleMouseUp);
   try {
     uIOhook.start();
   } catch (err) {
@@ -247,6 +322,8 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
     stop() {
       try { uIOhook.off("keydown", handleDown); } catch {}
       try { uIOhook.off("keyup", handleUp); } catch {}
+      try { uIOhook.off("mousedown", handleMouseDown); } catch {}
+      try { uIOhook.off("mouseup", handleMouseUp); } catch {}
       try { uIOhook.stop(); } catch {}
     }
   };
