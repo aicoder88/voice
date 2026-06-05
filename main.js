@@ -170,7 +170,9 @@ function stripWhisperNoiseTokens(/** @type {string} */ text) {
 
 function makeTrayIcon(/** @type {string} */ language) {
   try {
-    const file = language === "en" ? "tray-en.png" : "tray-hr.png";
+    // No dedicated "auto" art — fall back to the app icon for auto mode so the
+    // tray doesn't claim a specific language.
+    const file = language === "en" ? "tray-en.png" : language === "hr" ? "tray-hr.png" : "tray.ico";
     const img = nativeImage.createFromPath(join(__dirname, "public", file));
     if (!img.isEmpty()) return img;
   } catch {}
@@ -630,7 +632,9 @@ function createDictationWindow() {
 
 // Languages cycled by the right-Ctrl tap. Stored in process.env so deepgram.js
 // can read the latest value on every new connection without an IPC round-trip.
-const DICTATION_LANGUAGES = ["hr", "en"];
+// "auto" (the default) races parallel hr+en Deepgram connections and keeps the
+// more confident transcript; hr/en remain as manual overrides.
+const DICTATION_LANGUAGES = ["auto", "hr", "en"];
 
 function getCurrentLanguage() {
   return (process.env.WHISPER_LANGUAGE || DICTATION_LANGUAGES[0]).toLowerCase();
@@ -651,9 +655,9 @@ function updateTrayTooltip() {
   const lang = getCurrentLanguage();
   const keyLabel = process.platform === "darwin" ? "right Option" : "right Alt";
   tray.setToolTip(
-    `Language: ${lang.toUpperCase()}\n` +
+    `Language: ${lang === "auto" ? "AUTO (hr/en detected per dictation)" : lang.toUpperCase()}\n` +
     `Hold ${keyLabel} to dictate.\n` +
-    `Tap right Ctrl to toggle hr / en.`
+    `Tap right Ctrl to cycle auto / hr / en.`
   );
   try { tray.setImage(makeTrayIcon(lang)); } catch {}
 }
