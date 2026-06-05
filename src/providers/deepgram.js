@@ -29,21 +29,19 @@ export function attach(clientSocket, { apiKey, model, language }) {
     endpointing: "false",
     vad_events: "false"
   });
-  // smart_format and custom-vocabulary boosting are English-only on Deepgram.
-  // Adding either with language=hr (or any other non-English) returns HTTP 400
-  // at the WS handshake.
-  if (lang === "en" || lang === "en-us" || lang === "en-gb") {
-    params.set("smart_format", "true");
-    // Bias toward the user's custom dictionary. nova-3 uses keyterm prompting;
-    // older Deepgram models use the keywords param. Each term is appended as a
-    // repeated query param. Re-read per connection so freshly-added words apply
-    // to the very next dictation.
-    try {
-      const terms = vocab.deepgramKeyterms();
-      const param = /nova-3/i.test(model) ? "keyterm" : "keywords";
-      for (const term of terms) params.append(param, term);
-    } catch {}
-  }
+  // smart_format and keyterm prompting used to be English-only; Deepgram now
+  // accepts both for nova-3 monolingual languages including hr (handshake
+  // verified 2026-06-05 — no HTTP 400).
+  params.set("smart_format", "true");
+  // Bias toward the user's custom dictionary. nova-3 uses keyterm prompting;
+  // older Deepgram models use the keywords param. Each term is appended as a
+  // repeated query param. Re-read per connection so freshly-added words apply
+  // to the very next dictation.
+  try {
+    const terms = vocab.deepgramKeyterms();
+    const param = /nova-3/i.test(model) ? "keyterm" : "keywords";
+    for (const term of terms) params.append(param, term);
+  } catch {}
   const dgUrl = `wss://api.deepgram.com/v1/listen?${params.toString()}`;
   const dgSocket = new WebSocket(dgUrl, {
     headers: { Authorization: `Token ${apiKey}` }
@@ -53,6 +51,10 @@ export function attach(clientSocket, { apiKey, model, language }) {
   let lastInterim = "";
   const queuedBinaries = [];
   let completedSent = false;
+  // Set when the browser commits (key released) and we ask Deepgram to flush.
+  // Deepgram never sends a message of type "Finalize" back — it marks the
+  // flushed result with from_finalize: true on a normal Results frame.
+  let finalizeSent = false;
   function emitCompleted() {
     if (completedSent) return;
     completedSent = true;
@@ -77,22 +79,26 @@ export function attach(clientSocket, { apiKey, model, language }) {
     if (msg.type === "Results") {
       const alt = msg.channel?.alternatives?.[0];
       const text = alt?.transcript || "";
-      if (!text) return;
-      if (msg.is_final) {
-        finalParts.push(text);
-        lastInterim = "";
-        sendToClient(clientSocket, {
-          type: "conversation.item.input_audio_transcription.delta",
-          delta: text + " "
-        });
-      } else {
-        lastInterim = text;
+      if (text) {
+        if (msg.is_final) {
+          finalParts.push(text);
+          lastInterim = "";
+          sendToClient(clientSocket, {
+            type: "conversation.item.input_audio_transcription.delta",
+            delta: text + " "
+          });
+        } else {
+          lastInterim = text;
+        }
       }
-      return;
-    }
-
-    if (msg.type === "Finalize") {
-      emitCompleted();
+      // The flush triggered by our Finalize arrives as a Results frame with
+      // from_finalize: true (possibly with an empty transcript). That is the
+      // real "everything is transcribed" signal — complete immediately instead
+      // of letting the blind timeout fire, which was both slow (~1.5s) and
+      // raced the renderer's own fallback, dropping the last words.
+      if (finalizeSent && (msg.from_finalize === true || msg.speech_final === true)) {
+        emitCompleted();
+      }
       return;
     }
     if (msg.type === "UtteranceEnd") {
@@ -132,10 +138,13 @@ export function attach(clientSocket, { apiKey, model, language }) {
     }
 
     if (parsed.type === "input_audio_buffer.commit") {
+      finalizeSent = true;
       if (dgSocket.readyState === WebSocket.OPEN) {
         dgSocket.send(JSON.stringify({ type: "Finalize" }));
       }
-      setTimeout(emitCompleted, 1500);
+      // Safety net only — the from_finalize Results frame above is the normal
+      // completion path. Long enough that it can't beat a healthy flush.
+      setTimeout(emitCompleted, 3000);
       return;
     }
   });

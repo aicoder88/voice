@@ -433,8 +433,8 @@ function showPillResult(
   currentRecordingPath = recordingPath;
   setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath });
   pillWindow?.showInactive();
-  // Errors get a long backstop: the renderer keeps the error pill up 30s so a
-  // missed paste can still be copied; success hides quickly as before.
+  // Renderer auto-hides the pill itself (3s success / 8s error, pill.html).
+  // These are only crash backstops in case the renderer never reports back.
   armPillSafetyHide(state === "error" ? 45000 : 12000);
 }
 
