@@ -4,6 +4,12 @@ import { execFile } from "node:child_process";
 
 const USE_CLIPBOARD = process.env.TYPE_VIA_CLIPBOARD !== "false";
 const RELEASE_DELAY_MS = Number(process.env.TYPE_RELEASE_DELAY_MS || 80);
+// How long to wait for the osascript paste helper before declaring the paste
+// failed. Normally it returns in well under a second; the only time it doesn't
+// is a system-level wedge (System Events not launching, or processes stuck in
+// kernel exit — seen 2026-06-06), where waiting longer never helps. Without
+// this cap, typeText awaits forever and the pill is stuck on "Transcribing…".
+const PASTE_TIMEOUT_MS = Number(process.env.TYPE_PASTE_TIMEOUT_MS) || 4000;
 
 /**
  * @param {number} ms
@@ -40,10 +46,26 @@ function nut() {
 function pasteShortcut() {
   if (process.platform === "darwin") {
     return new Promise((resolve, reject) => {
+      // Settle exactly once: on the child's exit, or on the timeout — whichever
+      // comes first. execFile's own `timeout` SIGKILLs the child as a best
+      // effort, but a kernel-stuck child ignores signals and never emits
+      // 'close', so we must not rely on the callback alone.
+      let settled = false;
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        reject(new Error("osascript paste helper did not return within " + PASTE_TIMEOUT_MS + "ms (System Events hung?)"));
+      }, PASTE_TIMEOUT_MS);
       execFile(
         "/usr/bin/osascript",
         ["-e", 'tell application "System Events" to keystroke "v" using command down'],
-        (err) => (err ? reject(err) : resolve())
+        { timeout: PASTE_TIMEOUT_MS, killSignal: "SIGKILL" },
+        (err) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          err ? reject(err) : resolve();
+        }
       );
     });
   }
