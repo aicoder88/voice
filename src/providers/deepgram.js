@@ -121,7 +121,7 @@ export function attach(clientSocket, { apiKey, model, language }) {
         // leg has flushed instead of letting a blind timeout fire.
         if (finalizeSent && (msg.from_finalize === true || msg.speech_final === true)) {
           leg.flushed = true;
-          if (legs.every((l) => l.flushed)) emitCompleted();
+          if (legs.every((l) => l.flushed)) emitCompleted("from_finalize");
         }
         return;
       }
@@ -136,7 +136,7 @@ export function attach(clientSocket, { apiKey, model, language }) {
       // surviving leg's flush can complete the utterance.
       leg.flushed = true;
       if (multiLeg && legs.some((l) => !l.flushed || l.transcriptText())) {
-        if (finalizeSent && legs.every((l) => l.flushed)) emitCompleted();
+        if (finalizeSent && legs.every((l) => l.flushed)) emitCompleted("leg_error");
         return;
       }
       sendToClient(clientSocket, { type: "local.error", message: "Deepgram: " + error.message });
@@ -145,7 +145,7 @@ export function attach(clientSocket, { apiKey, model, language }) {
     dgSocket.on("close", (code, reason) => {
       console.error("[relay] deepgram closed lang=" + legLang + " code=" + code + " reason=" + reason.toString());
       leg.flushed = true;
-      if (legs.every((l) => l.flushed)) emitCompleted();
+      if (legs.every((l) => l.flushed)) emitCompleted("socket_close");
       if (legs.every((l) => l.dgSocket.readyState === WebSocket.CLOSED || l.dgSocket.readyState === WebSocket.CLOSING)) {
         sendToClient(clientSocket, { type: "local.status", status: "closed", code });
         clientSocket.close();
@@ -167,7 +167,7 @@ export function attach(clientSocket, { apiKey, model, language }) {
 
   const legs = langs.map(makeLeg);
 
-  function emitCompleted() {
+  function emitCompleted(/** @type {string} */ reason = "unknown") {
     if (completedSent) return;
     completedSent = true;
     // Winner: the leg with the highest confidence that actually heard words.
@@ -177,15 +177,24 @@ export function attach(clientSocket, { apiKey, model, language }) {
       const b = best.transcriptText() ? best.confidence() : -1;
       if (a > b) best = leg;
     }
-    if (multiLeg) {
-      console.error(
-        "[relay] deepgram auto-lang pick=" + best.lang + " " +
-        legs.map((l) => l.lang + "=" + l.confidence().toFixed(3)).join(" ")
-      );
+    // Always log the per-leg outcome (not just in multi-leg auto mode) so a
+    // dictation that completed with nothing is diagnosable instead of a mystery
+    // blank. Each leg reports how many words it heard and at what confidence.
+    const legSummary = legs
+      .map((l) => `${l.lang}:words=${l.confWords},conf=${l.confidence().toFixed(3)},len=${l.transcriptText().length}`)
+      .join(" ");
+    const winnerText = best.transcriptText();
+    if (!winnerText) {
+      // Every leg came back empty — the single most useful thing to surface when
+      // chasing "I dictated and nothing happened" (silence, mic gain, or both
+      // auto-language legs genuinely hearing nothing).
+      console.error(`[relay] deepgram ALL EMPTY (reason=${reason}, multiLeg=${multiLeg}) ${legSummary}`);
+    } else {
+      console.error(`[relay] deepgram complete pick=${best.lang} (reason=${reason}) ${legSummary}`);
     }
     sendToClient(clientSocket, {
       type: "conversation.item.input_audio_transcription.completed",
-      transcript: best.transcriptText(),
+      transcript: winnerText,
       language: best.lang
     });
   }
@@ -215,7 +224,9 @@ export function attach(clientSocket, { apiKey, model, language }) {
       }
       // Safety net only — the from_finalize Results frames above are the
       // normal completion path. Long enough that it can't beat a healthy flush.
-      setTimeout(emitCompleted, 3000);
+      // If THIS is what completes the utterance, the flush never came back —
+      // worth seeing in the log (reason=safety_timeout).
+      setTimeout(() => emitCompleted("safety_timeout"), 3000);
       return;
     }
   });

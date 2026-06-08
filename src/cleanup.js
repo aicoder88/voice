@@ -1,6 +1,7 @@
 // @ts-check
 
 import * as vocab from "./vocab.js";
+import { withRetry, httpError, RetryableHttpError, HttpError } from "./retry.js";
 
 /**
  * @typedef {object} ProviderConfig
@@ -142,32 +143,49 @@ export async function polishTranscript(rawText) {
     rawText +
     "\n<<<END>>>";
 
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+  const req = buildRequest(PROVIDER, apiKey, CLEANUP_MODEL, SYSTEM_PROMPT, userContent);
 
+  // One quick retry on a transient hiccup (429 rate-limit, 5xx, dropped
+  // connection) so a single bad moment doesn't silently fall back to the raw,
+  // unformatted transcript. Each attempt gets its own timeout budget; an abort
+  // (the request genuinely ran out of time) is NOT retried — retrying would only
+  // double the wait the user is already feeling.
   try {
-    const req = buildRequest(PROVIDER, apiKey, CLEANUP_MODEL, SYSTEM_PROMPT, userContent);
-    const response = await fetch(req.url, {
-      method: "POST",
-      headers: req.headers,
-      body: req.body,
-      signal: controller.signal
-    });
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      console.error(`Cleanup HTTP ${response.status} (${CLEANUP_PROVIDER}/${CLEANUP_MODEL}): ${body.slice(0, 200)}`);
-      return rawText;
-    }
-
-    const data = await response.json();
+    const data = await withRetry(
+      async () => {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        try {
+          const response = await fetch(req.url, {
+            method: "POST",
+            headers: req.headers,
+            body: req.body,
+            signal: controller.signal
+          });
+          if (!response.ok) {
+            const body = await response.text().catch(() => "");
+            throw httpError(response.status, body.slice(0, 200));
+          }
+          return await response.json();
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+      {
+        retries: 1,
+        onRetry: (err) =>
+          console.error(`Cleanup transient failure, retrying once (${CLEANUP_PROVIDER}/${CLEANUP_MODEL}):`, err && err.message)
+      }
+    );
     const cleaned = parseResponse(PROVIDER, data);
     return (cleaned && cleaned.trim()) || rawText;
   } catch (error) {
-    console.error("Cleanup error:", error.message);
+    if (error instanceof RetryableHttpError || error instanceof HttpError) {
+      console.error(`Cleanup HTTP ${error.status} (${CLEANUP_PROVIDER}/${CLEANUP_MODEL}): ${error.body}`);
+    } else {
+      console.error("Cleanup error:", error && error.message);
+    }
     return rawText;
-  } finally {
-    clearTimeout(timer);
   }
 }
 

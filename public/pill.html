@@ -111,10 +111,12 @@
       const openBtn = document.getElementById("open");
 
       // Auto-hide for result states, paused while the pointer is over the pill
-      // so there's time to click Copy / Open. A clean success vanishes fast
-      // (it worked, get out of the way); an error lingers so the user can act.
-      const HIDE_BY_STATE = { success: 3000, error: 8000 };
-      let currentHideMs = 8000;
+      // so there's time to click Copy / Open. A clean success clears fairly
+      // quickly (it worked, get out of the way); an error lingers a long time so
+      // the user can read it, copy the text, or open the recording without it
+      // vanishing mid-reach. Backstopped by main's safety timer (12s/45s).
+      const HIDE_BY_STATE = { success: 6000, error: 30000 };
+      let currentHideMs = 30000;
       let hideTimer = null;
       function clearHide() { if (hideTimer) { clearTimeout(hideTimer); hideTimer = null; } }
       function armHide(ms) {
@@ -135,7 +137,9 @@
         copyBtn.textContent = "Copy";
         document.body.classList.toggle("has-actions", !!(showCopy || showOpen));
 
-        currentHideMs = HIDE_BY_STATE[state] ?? 8000;
+        // Main decides the lingering time per result (it knows whether the
+        // paste was confirmed); fall back to the per-state defaults if it didn't.
+        currentHideMs = (data && typeof data.holdMs === "number" ? data.holdMs : HIDE_BY_STATE[state]) ?? 8000;
         clearHide();
         if (isResult) armHide(currentHideMs);
       }
@@ -152,11 +156,11 @@
       });
 
       // Keep the pill alive while the user is reaching for a button; on leave,
-      // re-arm with the state's own timeout (3s success / 8s error).
+      // re-arm with whatever lingering time this result was given.
       document.body.addEventListener("mouseenter", clearHide);
       document.body.addEventListener("mouseleave", () => {
         const s = document.body.getAttribute("data-state");
-        if (s === "success" || s === "error") armHide(currentHideMs); // 3s success / 8s error
+        if (s === "success" || s === "error") armHide(currentHideMs);
       });
 
       window.pillBridge.onState(applyState);

@@ -1,38 +1,30 @@
-# Plan — custom dictionary + polish pass
+# Plan — three regressions (2026-06-08)
 
-Goal: GVoice learns the names/jargon it mishears. After a dictation, a pop-up at
-the cursor offers to add an unusual name — or a word the user just hand-fixed —
-to a custom dictionary that biases every speech engine. Plus four polish fixes.
+Reconciled diverged branches first (rebased local paste-timeout fix onto remote
+Deepgram parallel-legs work). All three failures share one root: a failed/empty
+dictation gives the user nothing to see, click, or listen to.
 
-Status: COMPLETE (not committed — awaiting user go-ahead).
+## 1. Failed/empty transcript is now recoverable (fixes "not heard, not pasted")
+- public/dictation.js: on an empty terminal frame, if we captured real audio
+  (>= MIN_FAILURE_BYTES) send the chunks (text:"") instead of a bare "" — so main
+  can save the recording and surface a failed attempt instead of a silent hide.
+- main.js transcript handler: empty text + audio → save recording, show Error
+  pill (Open recording), record a history entry. Tiny taps (no audio) still hide
+  quietly.
+- main.js dictation:failure handler: also record a history entry so the attempt
+  shows in the tray and is listenable.
 
-Impact-ordered:
+## 2. Failure pill stays long enough to click (fixes "disappeared too fast")
+- public/pill.html: success 3s->6s, error 8s->30s; hover still pauses. Main-side
+  safety backstops (12s/45s) already exceed these.
 
-1. **Custom dictionary store** — `src/vocab.js`. One JSON store
-   (`userData/custom-vocab.json`) shared in-process by main.js (writes) and the
-   relay providers (read). Candidate detection (likely-misheard names),
-   correction matching (Levenshtein near-miss), add/dismiss, per-provider
-   formatting. DONE + 18 unit assertions pass.
+## 3. Listen to recordings from the tray (fixes "can't hear last attempt")
+- saveTempRecording: keep the last 50 clips (prune) instead of deleting all but
+  one; stop wiping the folder at boot so the last attempt survives a restart.
+- src/history.js: HistoryEntry gains optional recordingPath; recordTranscript
+  accepts it and allows an entry with no text but a recording.
+- main.js tray: each recent dictation becomes a submenu (Copy text / Play
+  recording); add a top-level "Play last recording".
 
-2. **Feed all three engines** — whisper-local (initial prompt), deepgram (nova-3
-   `keyterm`, English-only), openai (transcription `prompt`). DONE. Parity 5/5.
-
-3. **Cursor pop-up** — `public/vocab-prompt.html` + `preload-vocab.cjs` +
-   `createVocabWindow`/`showVocabPrompt` in main.js. Frameless, non-focusable,
-   appears at the mouse cursor. Add / No-thanks. Asks once per word per session;
-   "No thanks" persists forever. DONE.
-
-4. **Manual-correction watcher** — `src/correction-watch.js`. Adds its own
-   keydown/mousedown listener to the existing uiohook singleton, armed for
-   ~25s after each dictation, reconstructs hand-typed words, offers the ones
-   that look like a fix of what GVoice typed. macOS/Linux only. DONE.
-
-5. **Polish fixes**:
-   - README rewritten for GVoice (was the old "Realtime Voice Agents" demo). DONE.
-   - Stale `.claude/` docs refreshed (this pass). DONE.
-   - Per-event console logs gated behind `GVOICE_DEBUG` in main.js + hotkey.js. DONE.
-   - `debug.log` deleted (gitignored). DONE.
-   - (#4 from the audit — Windows-only build target — intentionally skipped:
-     the app runs on macOS via `electron .`, no Mac packaging target needed.)
-
-See notes.md for decisions and the review-gate outcome.
+## Review-gate decisions
+- (recorded in notes.md as work completes)

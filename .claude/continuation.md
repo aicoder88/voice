@@ -1,76 +1,55 @@
-# Continuation — custom dictionary + polish pass
+# Continuation — eight improvements (2026-06-08 pt.3)
 
-Status: COMPLETE. Unit tests (18/18) + parity (5/5) pass. Not committed
-(awaiting user "ok"/"push").
+Status: COMPLETE in source. `node --check` clean on all touched files;
+`pnpm test:unit` 54/54; `pnpm test:parity` 4 pass + 1 pre-existing network skip;
+`pnpm test:cleanup` 8/9 (the 1 "fail" is the documented honest groq-429 rate-limit
+fallback, not a regression). NOT committed and NOT rebuilt into
+/Applications/GVoice.app — the user runs the packaged app, so a `pnpm build` is
+needed to test live (or run via `pnpm start`).
 
-## What this added
-GVoice now learns the names/jargon it mishears. After a successful dictation it
-looks for an unusual capitalized name in what it typed, and (macOS/Linux) watches
-~12s for the user hand-fixing a word. Either triggers a small pop-up at the
-cursor: *Add "X" to your dictionary?* Added words bias every engine. Asked once
-per word; "No thanks" is remembered forever.
+## What shipped (the 8-item list, all uncommitted)
+1. Settings window — src/settings.js (pure .env writer), public/settings.html,
+   preload-settings.cjs, IPC settings:get/save/clear-recordings in main.js.
+   Live-apply: realtime-relay.js reads keys fresh per connection;
+   reloadDictationWindow() on provider switch; first-run save boots relay +
+   bringUpDictation().
+2. Windows paste verify — foreground.isForegroundWindow(); processTranscript
+   downgrades pasted→false if focus left the restored window mid-paste (win32).
+3. Retry — src/retry.js, wired into cleanup.js + whisper-local runWhisperServer.
+   Streaming WS providers intentionally not retried (dup-transcript risk).
+4. Recordings privacy — src/recordings.js (count + age prune), RECORDINGS_ENABLED
+   + RECORDING_RETENTION_DAYS, boot prune, tray "Clear recordings", Settings UI.
+5. Tests — scripts/unit/{hotkey-logic,vocab,settings,recordings,retry}.test.js.
+   `pnpm test:unit`. Pure reducers extracted to src/hotkey-logic.js (shared by
+   both hotkey backends).
+6. Offline pre-flight — public/dictation.js: cloud provider + offline → helpful
+   error before connecting.
+7. Deepgram observability — emitCompleted(reason) logs per-leg detail + ALL-EMPTY.
+8. First-run onboarding — needsOnboarding() opens Settings when key/model missing.
 
-## Follow-up added this turn (the bootstrap fix)
-User feedback: "it tends to guess at words I'm making up — there is no pop-up."
-Root cause: the cursor pop-up can only confirm what was transcribed, but a
-made-up word is transcribed as a *different* real word (usually lowercase, so it
-isn't even flagged as a name candidate) — so the pop-up can never capture it.
-The only fix is seeding the word BEFORE transcription so the engine biases
-toward it. Added a **dictionary manager window** (tray → "Manage dictionary…")
-to type words in directly + review/remove them. Replaced the raw-JSON
-"Edit dictionary…" tray item (and removed now-dead vocab.ensureFile /
-getStorePath). New files: public/dictionary.html, preload-dictionary.cjs. New in
-main.js: openDictionaryWindow + ipcMain.handle vocab:list / vocab:add-many /
-vocab:remove. New in vocab.js: removeTerm. package.json: preload-dictionary.cjs
-in build.files.
+## Files touched
+New: src/settings.js, src/recordings.js, src/retry.js, src/hotkey-logic.js,
+preload-settings.cjs, public/settings.html, scripts/unit/*.test.js.
+Modified: main.js, src/hotkey.js, src/foreground.js, src/cleanup.js,
+src/providers/whisper-local.js, src/providers/deepgram.js, realtime-relay.js,
+src/bootstrap-env.js (exports ENV_FILE), public/dictation.js, package.json,
+.env.example, README.md.
 
-## Files
-- src/vocab.js (NEW) — the dictionary store + brains. init/addTerm/removeTerm/dismissTerm/
-  isKnown/isDismissed, detectCandidates (mid-sentence capitalized, unknown,
-  uncommon), isLikelyCorrection (Levenshtein ≤2 near-miss), wordsOf, and the
-  three provider formatters (whisperPromptAddition / deepgramKeyterms /
-  openaiPromptAddition). Store: userData/custom-vocab.json (repo-local default
-  for non-Electron hosts). Seeds the "known" set from models/vocab.txt too.
-- src/correction-watch.js (NEW) — uiohook keydown/mousedown listener, armed per
-  dictation, reconstructs hand-typed words (US-letter layout + shift), no-op on
-  Windows. Privacy: only acts while armed, only the in-progress word in memory.
-- public/vocab-prompt.html (NEW) + preload-vocab.cjs (NEW) — the cursor pop-up.
-- main.js — vocab.init at boot; createVocabWindow / positionVocabAtCursor /
-  showVocabPrompt / hideVocab / maybeSuggestVocab; correctionWatcher wiring
-  (arm on success, disarm on next press); IPC vocab:add/dismiss/hide; tray
-  "Edit dictionary…"; GVOICE_DEBUG-gated debug() replacing chatty info logs.
-- src/providers/deepgram.js — appends nova-3 `keyterm` (or `keywords`) per
-  custom term, English-only (alongside smart_format guard).
-- src/providers/whisper-local.js — folds whisperPromptAddition() into the
-  initial prompt every commit.
-- src/providers/openai.js — adds transcription `prompt` from the dictionary.
-- src/hotkey.js — PRESS/RELEASE/TAP traces gated behind GVOICE_DEBUG.
-- package.json — preload-vocab.cjs added to build.files.
-- README.md — rewritten for GVoice. SETUP.md + .env.example — dictionary section
-  + GVOICE_CORRECTION_WATCH_MS / GVOICE_DEBUG.
-- debug.log — deleted (gitignored).
+## To verify in the real app (after pnpm build)
+- Rename/clear .env key → relaunch → Settings opens on first run; paste a key,
+  Save → dictation works WITHOUT restart.
+- Tray → Settings… → switch engine → next dictation uses it.
+- Settings → "Delete all recordings now" and the retention-days field; tray
+  "Clear recordings".
+- (Windows) paste while another app steals focus → Error pill, text on clipboard.
 
-## Trigger model (per user's answers)
-- "Only likely-misheard names": detectCandidates is conservative (mid-sentence
-  capitalized, ≥3 chars, not common, not known/dismissed).
-- All three engines biased.
-- "Corrected" = BOTH the cleanup-diff cases (a known word stays known) AND
-  watching manual edits via the keystroke watcher (user chose the fuller path).
+## Known follow-ups (surfaced by review, deliberately deferred)
+- whisper PID file is a single fixed tmp path → two GVoice instances could kill
+  each other's whisper-server. PRE-EXISTING (not from this pass). Fix = per-PID or
+  per-userData pidfile if it ever bites.
+- reloadDictationWindow vs a rapid first-run double-save: theoretical double
+  loadURL race. Not worth a mutex unless seen in practice.
 
-## Config / env
-- GVOICE_CORRECTION_WATCH_MS (default 12000; 0 disables manual-edit watch).
-- GVOICE_DEBUG=1 echoes per-event traces to console (always in debug.log).
-
-## Tests
-- node /tmp/vocab-test.mjs — 18 assertions (candidate detection, correction
-  match, add/dismiss roundtrip, provider formatting). Throwaway; re-derive from
-  src/vocab.js exports if needed.
-- node --test scripts/parity/dictation-flow.test.js — 5/5 pass.
-
-## Known limitations (see notes.md)
-- Manual-edit watcher is macOS/Linux only and US-letter-layout (names are ASCII
-  in practice); Windows still gets transcript-based suggestions.
-- Deepgram keyterm boosting is English-only (Deepgram limitation); Whisper
-  biasing works in any language.
-- Caret position isn't available cross-app on macOS, so the pop-up anchors to
-  the mouse cursor, not the text caret.
+## Next step options
+- "ok" → rebuild (`pnpm build`, mac dir target) + reinstall /Applications/GVoice.app.
+- "commit" / "push" → stage + commit the working tree.

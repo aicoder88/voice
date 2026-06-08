@@ -18,9 +18,10 @@ let alreadyFinalized = false;
 let activeProfile = null;
 
 // Full audio of the current utterance (pre-roll + everything streamed while
-// recording), kept as a list of Uint8Array PCM16 chunks. This is the backup:
-// if processing fails, it gets shipped to the main process and written to disk
-// so a long dictation is never silently lost. Cleared on success.
+// recording), kept as a list of Uint8Array PCM16 chunks. Shipped to the main
+// process on every terminal frame (success, failure, or empty) and written to
+// disk so the recording is recoverable and the user can listen back. Drained
+// (handed off + reset) as the utterance completes — see drainChunks().
 let recordedChunks = [];
 let recordedBytes = 0;
 // True once a terminal frame (transcript OR a server-decided empty) arrives.
@@ -171,10 +172,20 @@ function handleRealtimeEvent(msg) {
       lastFinalAt = Date.now();
       finalizeAndSend(finalText.trim());
     } else if (!alreadyFinalized) {
-      // Terminal frame with no text (silence gate or hallucination filter).
-      // Tell main anyway so it drops the pill instead of leaving the spinner up.
+      // Terminal frame with no text. Two cases:
+      //  - We captured real audio: a genuine attempt that came back empty
+      //    (mis-recognition, both auto-language legs silent, a flush race). Hand
+      //    the recording to main so it surfaces a failed attempt the user can
+      //    listen to, instead of vanishing as if nothing happened.
+      //  - Little/no audio (a too-short tap): nothing worth keeping — send a
+      //    bare "" so main drops the pill quietly.
       alreadyFinalized = true;
-      window.dictationBridge.sendTranscript("");
+      if (recordedBytes >= MIN_FAILURE_BYTES) {
+        window.dictationBridge.sendTranscript({ text: "", chunks: drainChunks(), sampleRate: targetSampleRate });
+      } else {
+        window.dictationBridge.sendTranscript("");
+        drainChunks(); // tiny misfire — nothing to keep, just clear the buffer
+      }
     }
     return;
   }
@@ -192,6 +203,16 @@ function clearFailureTimer() {
   }
 }
 
+// Hand the captured audio off to main as base64 and clear the buffer. Every
+// terminal path (success / failure / empty) drains exactly once, so the buffer
+// can't grow press-over-press or leak into the next utterance.
+function drainChunks() {
+  const chunks = recordedChunks.map((u8) => u8ToBase64(u8));
+  recordedChunks = [];
+  recordedBytes = 0;
+  return chunks;
+}
+
 // A dictation couldn't be turned into text. If we captured enough audio, hand
 // the whole recording to the main process so it can be saved and offered back
 // for retry / playback. Otherwise there's nothing worth keeping — just report
@@ -205,13 +226,11 @@ function reportFailure(reason) {
   log("Failure: " + reason + " (" + recordedBytes + "B captured)");
 
   if (recordedBytes >= MIN_FAILURE_BYTES) {
-    const chunks = recordedChunks.map((u8) => u8ToBase64(u8));
-    window.dictationBridge.reportFailure({ chunks, sampleRate: targetSampleRate, reason });
+    window.dictationBridge.reportFailure({ chunks: drainChunks(), sampleRate: targetSampleRate, reason });
   } else {
     window.dictationBridge.sendError(reason);
+    drainChunks(); // misfire — discard the buffer
   }
-  recordedChunks = [];
-  recordedBytes = 0;
 }
 
 function finalizeAndSend(text) {
@@ -221,15 +240,10 @@ function finalizeAndSend(text) {
   clearFailureTimer();
   log("Final: " + text);
   // Ship the captured audio with the transcript so main can save it to the
-  // temporary recordings folder — the success pill's "Open recording" button
-  // needs a file even when transcription succeeded.
-  const chunks = recordedChunks.map((u8) => u8ToBase64(u8));
-  window.dictationBridge.sendTranscript({ text, chunks, sampleRate: targetSampleRate });
+  // recordings folder — the success pill's "Open recording" button and the
+  // tray's playback items need a file even when transcription succeeded.
+  window.dictationBridge.sendTranscript({ text, chunks: drainChunks(), sampleRate: targetSampleRate });
   transcriptParts = [];
-  // Drop the in-memory copy now that it's handed off, so memory doesn't grow
-  // press over press.
-  recordedChunks = [];
-  recordedBytes = 0;
 }
 
 // Bring the mic + worklet pipeline up once and leave it running. Idempotent:
@@ -368,6 +382,23 @@ async function startRecording(profile) {
   if (activeProfile) {
     log("Profile: lang=" + (activeProfile.language || "default") + " model=" + (activeProfile.model || "default"));
   }
+
+  // Offline pre-flight for the cloud engines. Without this, dictating offline
+  // fails with a confusing mid-take "lost the connection" after the user has
+  // already spoken. Catch it up front and point them at the local engine, which
+  // works with no internet. navigator.onLine is a cheap first signal (a false
+  // negative just means we connect and the existing WS error path takes over).
+  const provider = (new URLSearchParams(window.location.search).get("provider") || window.STT_PROVIDER || "openai").toLowerCase();
+  const isCloud = provider !== "whisper-local" && provider !== "local";
+  if (isCloud && navigator.onLine === false) {
+    setStatus("Offline");
+    log("Offline pre-flight: navigator.onLine === false, provider=" + provider);
+    window.dictationBridge.sendError(
+      "You're offline. Cloud dictation needs an internet connection — switch to local Whisper in Settings to dictate offline."
+    );
+    return;
+  }
+
   setStatus("Connecting…");
   try {
     await ensureSocket();

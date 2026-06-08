@@ -14,6 +14,8 @@ pnpm start
 
 The app lives in the menu bar (macOS) or system tray (Windows). Hold **right Option** (macOS) or **right Alt** (Windows), speak, and release. Tap **right Ctrl** to flip the language. Full setup — including the local, no-API-cost Whisper option — is in [SETUP.md](SETUP.md).
 
+First launch with no API key set? GVoice opens its **Settings** window so you can pick an engine and paste a key — no hand-editing files. You can reopen it any time from the tray (**Settings…**).
+
 ## Speech engines
 
 Pick one with `STT_PROVIDER` in `.env`:
@@ -65,7 +67,11 @@ Right Option/Alt released ──────────────┘
 
 ## Settings
 
-All configuration is environment variables in `.env`. The full table — engines, models, ports, cleanup, and the dictionary watch window — lives in [SETUP.md](SETUP.md).
+The common options — speech engine, default language, AI cleanup, API keys, and recording privacy — are in the **Settings…** window (tray menu). It writes the same `.env` the app reads, leaving your comments and other keys untouched, and changes apply to your next dictation without a restart.
+
+Everything (including the knobs not in the window — models, ports, the dictionary watch window) is still plain environment variables in `.env`; the full table lives in [SETUP.md](SETUP.md).
+
+**Recordings & privacy.** GVoice keeps recent dictation audio on disk so a missed paste stays recoverable. These clips are unencrypted. They're capped at the last 50 *and* auto-deleted after `RECORDING_RETENTION_DAYS` (default 7). Turn saving off entirely, change the window, or wipe them now from Settings (or the tray's **Clear recordings**).
 
 ## Troubleshooting & logs
 

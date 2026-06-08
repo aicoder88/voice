@@ -77,8 +77,15 @@ export function attachRealtimeRelay(server, options = {}) {
     const requestUrl = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
     const provider = (requestUrl.searchParams.get("provider") || defaultProvider).toLowerCase();
 
+    // Read the keys fresh from the environment on every connection, falling back
+    // to whatever was passed at construction. This is what lets the Settings
+    // window's "save a new API key" take effect on the very next dictation
+    // without restarting the app (main.js updates process.env on save).
+    const openaiKeyNow = process.env.OPENAI_API_KEY || apiKey;
+    const deepgramKeyNow = process.env.DEEPGRAM_API_KEY || deepgramApiKey;
+
     if (provider === "deepgram") {
-      if (!deepgramApiKey) {
+      if (!deepgramKeyNow) {
         sendToClient(clientSocket, { type: "local.error", message: "Missing DEEPGRAM_API_KEY in .env" });
         clientSocket.close();
         return;
@@ -86,7 +93,7 @@ export function attachRealtimeRelay(server, options = {}) {
       const langOverride = requestUrl.searchParams.get("language");
       const modelOverride = requestUrl.searchParams.get("model");
       attachDeepgram(clientSocket, {
-        apiKey: deepgramApiKey,
+        apiKey: deepgramKeyNow,
         model: modelOverride || deepgramModel,
         language: langOverride || deepgramLanguage
       });
@@ -98,12 +105,12 @@ export function attachRealtimeRelay(server, options = {}) {
       return;
     }
 
-    if (!apiKey) {
+    if (!openaiKeyNow) {
       sendToClient(clientSocket, { type: "local.error", message: "Missing OPENAI_API_KEY in .env" });
       clientSocket.close();
       return;
     }
-    attachOpenAI(clientSocket, requestUrl, { apiKey, model, instructions });
+    attachOpenAI(clientSocket, requestUrl, { apiKey: openaiKeyNow, model, instructions });
   });
 
   return {

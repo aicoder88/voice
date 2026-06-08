@@ -9,7 +9,8 @@
     "start": "electron .",
     "build": "electron-builder",
     "test:parity": "node --test --test-force-exit scripts/parity/dictation-flow.test.js",
-    "test:cleanup": "node scripts/cleanup-test.js"
+    "test:cleanup": "node scripts/cleanup-test.js",
+    "test:unit": "node --test scripts/unit/*.test.js"
   },
   "dependencies": {
     "@nut-tree-fork/nut-js": "^4.2.6",
@@ -33,6 +34,7 @@
       "preload-vocab.cjs",
       "preload-dictionary.cjs",
       "preload-splash.cjs",
+      "preload-settings.cjs",
       "server.js",
       "realtime-relay.js",
       "src/**/*",

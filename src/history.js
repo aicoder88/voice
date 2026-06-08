@@ -9,7 +9,7 @@ import { join } from "node:path";
 
 const MAX_ENTRIES = 50;
 
-/** @typedef {{ ts: number, text: string, pasted: boolean }} HistoryEntry */
+/** @typedef {{ ts: number, text: string, pasted: boolean, recordingPath?: string | null }} HistoryEntry */
 
 /** @type {HistoryEntry[]} */
 let entries = [];
@@ -26,6 +26,12 @@ export async function initHistory() {
     if (Array.isArray(raw)) {
       entries = raw
         .filter((e) => e && typeof e.text === "string" && typeof e.ts === "number")
+        .map((e) => ({
+          ts: e.ts,
+          text: e.text,
+          pasted: !!e.pasted,
+          recordingPath: typeof e.recordingPath === "string" ? e.recordingPath : null
+        }))
         .slice(0, MAX_ENTRIES);
     }
   } catch {
@@ -46,13 +52,15 @@ export function getHistory() {
 
 /**
  * Record a finished dictation and persist. Fire-and-forget: failures are
- * logged, never thrown into the dictation path.
+ * logged, never thrown into the dictation path. An entry is worth keeping if it
+ * has text OR a recording to listen to (a failed/empty attempt has only audio).
  * @param {string} text
  * @param {boolean} pasted
+ * @param {string | null} [recordingPath]
  */
-export function recordTranscript(text, pasted) {
-  if (!text || !text.trim()) return;
-  entries.unshift({ ts: Date.now(), text, pasted });
+export function recordTranscript(text, pasted, recordingPath = null) {
+  if ((!text || !text.trim()) && !recordingPath) return;
+  entries.unshift({ ts: Date.now(), text: text || "", pasted, recordingPath: recordingPath || null });
   if (entries.length > MAX_ENTRIES) entries.length = MAX_ENTRIES;
   const snapshot = JSON.stringify(entries, null, 2);
   writeChain = writeChain

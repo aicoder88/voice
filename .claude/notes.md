@@ -1,3 +1,170 @@
+# Session notes — 2026-06-08 (pt.3): eight improvements (settings UI, retry, privacy, tests, etc.)
+
+Implemented the 8-item improvement list. All additive; new logic pulled into pure,
+unit-tested modules instead of growing main.js.
+
+## New modules (all pure, no Electron import → unit-tested)
+- src/settings.js — surgical .env read/write (update-in-place, preserve comments +
+  unmanaged keys), settingsView/patchFromView. Backs the Settings window.
+- src/recordings.js — saveRecording / pruneRecordings (count + age caps, oldest
+  first) / clearRecordings. main.js saveTempRecording now delegates here.
+- src/retry.js — withRetry + httpError (RetryableHttpError for 429/5xx, plain
+  HttpError for 4xx so a clean 4xx is NOT retried). Wired into cleanup.js (per-
+  attempt timeout; abort/timeout deliberately not retried) and whisper-local
+  runWhisperServer (one retry before CLI fallback).
+- src/hotkey-logic.js — createTapDetector / createHoldTracker (injectable clock).
+  hotkey.js Windows + uiohook paths now share ONE implementation. Behavior
+  preserved (verified by adversarial review + 11 unit tests).
+
+## Features
+1. Settings window: public/settings.html + preload-settings.cjs + IPC
+   settings:get/save/clear-recordings. Live-apply: relay reads keys fresh per
+   connection (realtime-relay.js), provider switch reloads the dictation window,
+   first-run save boots the relay + bringUpDictation().
+2. Windows paste verify: foreground.isForegroundWindow(); processTranscript
+   downgrades pasted→false if focus left the restored window mid-paste.
+3. Retry (above). Streaming WS providers intentionally NOT retried (dup-transcript
+   risk) — documented in retry.js header.
+4. Recordings privacy: RECORDINGS_ENABLED + RECORDING_RETENTION_DAYS, boot prune,
+   tray "Clear recordings", Settings controls.
+5. Tests: scripts/unit/ (hotkey-logic, vocab, settings, recordings, retry) — 54
+   assertions, all pass. `pnpm test:unit`.
+6. Offline pre-flight in dictation.js: cloud provider + navigator.onLine===false →
+   helpful "switch to local Whisper" error before connecting.
+7. Deepgram observability: emitCompleted(reason) always logs per-leg
+   words/conf/len + an explicit ALL-EMPTY warning.
+8. First-run onboarding: needsOnboarding() opens Settings when the active engine's
+   key/model is missing, instead of a dead-end splash.
+
+## Review-gate decisions
+ACCEPTED (from adversarial + simplicity subagents):
+- Clear serverError at the top of bootRelayServer so a successful first-run retry
+  doesn't keep a stale "Missing KEY" string.
+- recordings NAME_RE made the random suffix OPTIONAL so older `dictation-<ts>.wav`
+  clips are still pruned/cleared (else "Clear recordings" silently leaks them).
+- Tray "Clear recordings" enabled on recordingsDir (not history's lastRecording),
+  matching the Settings button — clips can outlive the capped history.
+- Removed unused exports EDITABLE_KEYS (settings.js) and GVOICE_HOME (bootstrap-env.js).
+REJECTED:
+- Mutex around reloadDictationWindow for a rapid first-run double-save — too
+  speculative (reviewer agreed).
+- whisper PID-file shared across instances / process.on('exit') SIGKILL — real but
+  PRE-EXISTING, not introduced here. Left for a future pass.
+- Dropping tap.isOpen()/hold.size() — they're the clean state-machine surface the
+  unit tests assert against.
+
+## Verification
+- node --check on all touched files: clean.
+- pnpm test:unit → 54/54. pnpm test:parity → 4 pass, 1 skip (bad-key network skip,
+  pre-existing). pnpm test:cleanup → 8/9; the 1 "fail" is the documented honest
+  rate-limit failure (groq 429 → retry → still 429 → raw fallback), not a regression.
+- NOT yet rebuilt into /Applications/GVoice.app and NOT committed.
+
+---
+
+# Session notes — 2026-06-08 (pt.2): whisper-server lifecycle (stuck-on-Transcribing root cause)
+
+- ROOT CAUSE of "stuck on Transcribing…, no output": the local whisper-server bound
+  a FIXED port (8081). A crash / force-quit / app-update left the child orphaned
+  holding 8081; the next launch couldn't bind → every dictation waited forever.
+  (Confirmed the engine itself was fine: fed the user's real clips through the live
+  relay → correct transcript in ~450-560 ms.)
+- Provider was whisper-local all along (.env STT_PROVIDER=whisper-local) — NOT a
+  silent switch to Deepgram.
+
+## Fixes (src/providers/whisper-local.js + main.js)
+- DYNAMIC PORT: each launch takes a fresh free port via net.createServer(0); a
+  leftover server on the old port can no longer wedge startup. WHISPER_PORT still
+  overrides. Consumers read WHISPER_SERVER_URL (set by ensureWhisperServer) per
+  request, so the dynamic port is transparent.
+- STALE REAP: PID written to tmpdir/gvoice-whisper-server.pid on spawn; next boot
+  reaps it — but ONLY if the PID is alive AND `ps`/`tasklist` confirms it's really
+  a whisper-server (guards against PID reuse). SIGTERM → 2s grace → SIGKILL.
+- CLEAN SHUTDOWN: stopWhisperServer() = SIGTERM + 1.5s SIGKILL fallback + remove
+  pidfile. Called from a shared shutdownAll() on before-quit AND new SIGINT/SIGTERM
+  handlers (covers terminal/dev launches). process.on('exit') SIGKILLs as last ditch.
+- ROBUST START: boot warm retries once; reaps any orphan before the first dictation.
+
+## Verified on the installed app (rebuilt + reinstalled /Applications/GVoice.app)
+- Fresh launch: 1 whisper-server on a dynamic port, relay on :3000, end-to-end
+  transcription 563 ms.
+- Simulated crash (SIGKILL main) → orphan survived → relaunch REAPED it; exactly
+  one fresh server, pidfile updated.
+- Normal quit → whisper-server gone, pidfile removed.
+- 5/5 parity tests pass.
+
+## Review-gate (lifecycle)
+- ACCEPTED: dynamic port over "kill whatever holds 8081" — never touches an
+  unrelated process, and removes the collision entirely rather than racing it.
+- ACCEPTED: cmdline-verified kill (ps/tasklist) so a recycled PID is never killed.
+- REJECTED: tracking/reaping ALL historical whisper-servers — out of scope; one
+  pidfile for the server we own is enough, dynamic port makes leftovers harmless.
+
+---
+
+# Session notes — 2026-06-08: three regressions (empty paste / pill timing / listen to recordings)
+
+- Reconciled diverged branches first: rebased local paste-timeout fix (cc7b273)
+  onto remote Deepgram parallel-legs work (4acf6fa, 69204c7). No file overlap,
+  clean rebase. New tip 4313349.
+- ROOT CAUSE (likely behind #1 + #2): on macOS, a paste into a browser / Slack /
+  editor often can't be read back (`focusedFieldValue()` → null), so a paste that
+  silently went nowhere was still classed `pasted=true` → green "Success" pill at
+  the short 3s/6s timer. Looks exactly like "not pasted anywhere, popup vanished
+  before I could click."
+- Empty Deepgram result (both auto-language legs silent, or a flush race) fell
+  into a quiet hidePill() with the audio discarded — no pill, no recording.
+- Tray menu had no way to play recordings; history stored text only; recordings
+  were one-at-a-time and wiped at boot.
+
+## Fixes
+1. Renderer ships the audio on an empty terminal frame (>= MIN_FAILURE_BYTES);
+   main saves it, shows an Error pill, records a history entry → failed attempts
+   are now visible + listenable instead of silently dropped.
+2. Pill lingers: confirmed success 6s; error OR unverified success 30s (main
+   passes holdMs; renderer honours it; safety backstop = holdMs+15s).
+3. Recordings persist (last 50, pruned; no boot wipe); each history entry carries
+   its recordingPath; tray gives every recent dictation a Copy text / Play
+   recording submenu, plus a top-level "Play last recording".
+
+## Review-gate decisions (this pass)
+- ACCEPTED (adversarial): unverified-success now lingers like an error — the
+  highest-value fix; a silent browser miss stays recoverable from the pill.
+- ACCEPTED (adversarial): random suffix on recording filename — airtight against
+  two same-millisecond saves clobbering one file.
+- ACCEPTED (adversarial): fixed stale "Cleared on success" comment in dictation.js.
+- ACCEPTED (simplicity): drainChunks() helper collapses 3 encode+reset blocks so
+  no terminal path can forget to clear the buffer.
+- ACCEPTED (simplicity): trimmed the triplicated 3s/8s timing comment in pill.html.
+- REJECTED: coupling MAX_RECORDINGS to MAX_ENTRIES via import — different modules,
+  not worth the coupling for one int; comment notes the intent.
+- REJECTED: age-based recording prune — count cap (50) already bounds the folder;
+  persistence is exactly what the user asked for. PRIVACY NOTE surfaced to user:
+  last 50 recordings now sit unencrypted in userData/temp-recordings (no boot wipe).
+- Verified: 5/5 parity tests pass; all edited files pass `node --check`.
+
+---
+
+# Session notes — 2026-06-06: dictation stuck on "Transcribing…"
+
+- Root cause: macOS-level wedge starting 11:08 (system process `com.apple.appkit` stuck in kernel exit state E). From then on every `osascript` invocation either took ~5.4 min to error ("System Events … isn't running (-600)") or got stuck in exit state permanently.
+- The app's paste step (`src/typing.js` → `osascript … keystroke "v"`) awaited the child's exit with no timeout → pill frozen on "Transcribing…" forever. Two zombie osascript children (11:21, 11:26) had PPID = GVoice.
+- Transcription pipeline verified healthy end-to-end: whisper-server ~0.3s; full WS relay round-trip on the running app returned the user's words in 351 ms.
+- Fix shipped (cc7b273): 4s timeout race on the paste helper → on timeout the paste is treated as failed, error pill shows the text, text lands on the clipboard. Rebuilt + reinstalled /Applications/GVoice.app.
+- Machine still needs a REBOOT to clear kernel-stuck (state E) processes — kill -9 cannot touch them.
+
+## Review-gate decisions (paste timeout)
+- ACCEPTED: `Number(env) || 4000` guard so a malformed TYPE_PASTE_TIMEOUT_MS can't make every paste fail instantly.
+- REJECTED: distinguishing "keystroke landed but process stuck" from "never sent" on timeout — no reliable signal exists; a false error pill with recoverable text beats an infinite hang or false success.
+- REJECTED: clipboard-clobber concern — pre-existing intentional recovery behavior.
+- REJECTED: trimming the new constant's comment — documents a real incident; cosmetic.
+
+## Recovered dictations (from temp recordings, via whisper)
+- 11:26 attempt: "Good. I'll check if they were applied and if not apply them."
+- 11:21 attempt: "yet label." (short clip)
+
+---
+
 # Notes — custom dictionary + polish pass
 
 ## Key architecture decision

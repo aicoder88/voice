@@ -10,13 +10,16 @@
 // relay self-sufficient regardless of host (Electron, plain `npm run dev`,
 // or the parity harness).
 
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import { writeFile, unlink, mkdtemp, readFile } from "node:fs/promises";
+import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sendToClient, wrapWav } from "./_shared.js";
 import * as vocab from "../vocab.js";
+import { withRetry, httpError } from "../retry.js";
 
 const SAMPLE_RATE = 24000;
 // Anything shorter than this is almost certainly a misfire (the user tapped
@@ -156,6 +159,63 @@ let whisperServerProc = null;
 let whisperServerReady = null;
 let exitHandlerInstalled = false;
 
+// Records the PID of the whisper-server we spawned, so the NEXT app launch can
+// clean up a server orphaned by a crash or force-quit (which would otherwise
+// linger, hold the GPU/RAM, and — on a fixed port — wedge the next start).
+const PID_FILE = join(tmpdir(), "gvoice-whisper-server.pid");
+
+/** Does this PID exist? (signal 0 probes without killing.) */
+function isAlive(/** @type {number} */ pid) {
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** True only if `pid` is genuinely a whisper-server — so we never kill an
+ *  unrelated process that happens to have inherited a recycled PID. */
+function isOurWhisperServer(/** @type {number} */ pid) {
+  try {
+    if (process.platform === "win32") {
+      const out = execFileSync("tasklist", ["/FI", `PID eq ${pid}`, "/NH"], { encoding: "utf8" });
+      return /whisper-server/i.test(out);
+    }
+    const out = execFileSync("ps", ["-p", String(pid), "-o", "command="], { encoding: "utf8" });
+    return /whisper-server/i.test(out);
+  } catch {
+    return false;
+  }
+}
+
+/** Kill a whisper-server left behind by a previous run (best-effort). Only ever
+ *  touches a PID we wrote AND that still looks like our server. */
+async function reapStaleServer() {
+  let pid = 0;
+  try {
+    if (existsSync(PID_FILE)) pid = parseInt(readFileSync(PID_FILE, "utf8").trim(), 10);
+  } catch {}
+  try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {}
+  if (!(pid > 0) || !isAlive(pid) || !isOurWhisperServer(pid)) return;
+  console.error("[whisper-server] reaping stale server from a previous run, pid=" + pid);
+  try { process.kill(pid, "SIGTERM"); } catch { return; }
+  for (let i = 0; i < 20 && isAlive(pid); i++) {
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (isAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} }
+}
+
+/** Ask the OS for a free TCP port on loopback. Using a fresh port each launch
+ *  means a leftover server (or anything else) on the old port can never block
+ *  startup. */
+function getFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = createServer();
+    srv.on("error", reject);
+    srv.listen(0, "127.0.0.1", () => {
+      const addr = srv.address();
+      const port = addr && typeof addr === "object" ? addr.port : 0;
+      srv.close(() => (port ? resolve(port) : reject(new Error("no free port"))));
+    });
+  });
+}
+
 /**
  * Lazily spawn the whisper.cpp `whisper-server` binary on first attach.
  * Resolves once the server is responding on the configured port. On failure,
@@ -164,12 +224,19 @@ let exitHandlerInstalled = false;
  * @param {string} [bin]
  * @returns {Promise<void>}
  */
+// Tear the whisper-server down. SIGTERM first (clean), then SIGKILL shortly
+// after if it ignores it, so closing the app never leaves the model resident.
+// Synchronous-safe: callable from app 'before-quit' and process exit handlers.
 export function stopWhisperServer() {
-  if (whisperServerProc) {
-    try { whisperServerProc.kill("SIGTERM"); } catch {}
-    whisperServerProc = null;
-  }
+  const proc = whisperServerProc;
+  whisperServerProc = null;
   whisperServerReady = null;
+  try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {}
+  if (!proc || proc.killed || proc.pid == null) return;
+  const pid = proc.pid;
+  try { proc.kill("SIGTERM"); } catch {}
+  // Escalate if it's still around after a short grace period.
+  setTimeout(() => { if (isAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} } }, 1500).unref?.();
 }
 
 export function ensureWhisperServer(bin) {
@@ -181,10 +248,13 @@ export function ensureWhisperServer(bin) {
   // exited.
   const serverBin = bin ? bin.replace(/-cli(\.exe)?$/i, "-server$1") : "whisper-server";
   const model = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin";
-  const port = process.env.WHISPER_PORT || "8081";
-  const baseUrl = `http://127.0.0.1:${port}`;
 
   whisperServerReady = (async () => {
+    // Clean up a server orphaned by a previous crash/force-quit, then take a
+    // fresh free port so nothing left on the old port can wedge this start.
+    await reapStaleServer();
+    const port = process.env.WHISPER_PORT || String(await getFreePort());
+    const baseUrl = `http://127.0.0.1:${port}`;
     const args = [
       "-m", model,
       "--host", "127.0.0.1",
@@ -198,6 +268,10 @@ export function ensureWhisperServer(bin) {
     ];
     let spawnError = null;
     whisperServerProc = spawn(serverBin, args);
+    // Remember this server so the next launch can reap it if we die uncleanly.
+    if (whisperServerProc.pid != null) {
+      try { writeFileSync(PID_FILE, String(whisperServerProc.pid)); } catch {}
+    }
     whisperServerProc.on("error", (err) => {
       spawnError = err;
       console.error("[whisper-server] spawn error:", err.message);
@@ -220,14 +294,20 @@ export function ensureWhisperServer(bin) {
     whisperServerProc.on("exit", (code) => {
       console.error("[whisper-server] exited with code " + code);
       whisperServerProc = null;
+      // Our server is gone — drop the stale-PID marker so a future launch never
+      // mistakes a recycled PID for it.
+      try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {}
     });
 
     if (!exitHandlerInstalled) {
       exitHandlerInstalled = true;
+      // Last-ditch teardown if the app exits without calling stopWhisperServer
+      // (e.g. an uncaught error). Best-effort and synchronous.
       process.on("exit", () => {
         if (whisperServerProc) {
-          try { whisperServerProc.kill("SIGTERM"); } catch {}
+          try { whisperServerProc.kill("SIGKILL"); } catch {}
         }
+        try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {}
       });
     }
 
@@ -404,12 +484,23 @@ async function runWhisperServer(url, wavBuffer, prompt) {
   form.append("response_format", "json");
   form.append("temperature", "0.0");
   if (prompt) form.append("prompt", prompt);
-  const res = await fetch(url, { method: "POST", body: form });
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error("HTTP " + res.status + ": " + body.slice(0, 200));
-  }
-  const json = await res.json();
+  // One retry on a transient failure (a dropped connection during the POST, or a
+  // 5xx while the server is briefly busy) before the caller falls back to the
+  // slower CLI path. A clean 4xx is not retried — it would just fail again.
+  const json = await withRetry(
+    async () => {
+      const res = await fetch(url, { method: "POST", body: form });
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        throw httpError(res.status, body.slice(0, 200));
+      }
+      return res.json();
+    },
+    {
+      retries: 1,
+      onRetry: (err) => console.error("[relay] whisper-server transient failure, retrying once:", err && err.message)
+    }
+  );
   const text = (json.text || "").replace(/\s+/g, " ").trim();
   return text;
 }

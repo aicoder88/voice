@@ -1,0 +1,200 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>GVoice settings</title>
+    <style>
+      :root { color-scheme: dark; }
+      html, body {
+        margin: 0;
+        height: 100%;
+        background: #14181e;
+        color: #e7eef5;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        font-size: 14px;
+      }
+      body { display: flex; flex-direction: column; }
+      header { padding: 18px 20px 4px; }
+      h1 { font-size: 16px; margin: 0; }
+      .intro {
+        margin: 12px 20px 0; padding: 10px 12px;
+        background: #1b2a3a; border: 1px solid #294a6b; border-radius: 9px;
+        color: #cfe2f5; font-size: 12.5px; line-height: 1.45; display: none;
+      }
+      .form { flex: 1; overflow: auto; padding: 14px 20px 8px; }
+      .field { margin-bottom: 16px; }
+      label.row { display: block; font-weight: 600; margin-bottom: 6px; }
+      .hint { color: #8497a8; font-size: 11.5px; margin-top: 5px; line-height: 1.4; }
+      select, input[type="text"], input[type="password"], input[type="number"] {
+        width: 100%; box-sizing: border-box;
+        background: #1d232b; color: #fff;
+        border: 1px solid #2c3540; border-radius: 9px;
+        padding: 9px 11px; font: inherit; outline: none;
+      }
+      select:focus, input:focus { border-color: #4aa3ff; }
+      input::placeholder { color: #6b7986; }
+      .check { display: flex; align-items: center; gap: 9px; font-weight: 600; cursor: pointer; }
+      .check input { width: 16px; height: 16px; }
+      .inline { display: flex; align-items: center; gap: 10px; }
+      .inline input[type="number"] { width: 72px; flex: none; }
+      .keyrow { position: relative; }
+      .reveal {
+        position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
+        background: rgba(255,255,255,0.08); color: #cdd8e3;
+        border: 0; border-radius: 7px; padding: 4px 9px; font: inherit;
+        font-size: 11.5px; font-weight: 600; cursor: pointer;
+      }
+      .reveal:hover { background: rgba(255,255,255,0.16); }
+      button.secondary {
+        background: rgba(255,255,255,0.08); color: #cdd8e3;
+        border: 0; border-radius: 9px; padding: 8px 13px;
+        font: inherit; font-weight: 600; cursor: pointer;
+      }
+      button.secondary:hover { background: rgba(255, 90, 90, 0.24); color: #fff; }
+      footer {
+        display: flex; align-items: center; gap: 12px;
+        padding: 12px 20px 16px; border-top: 1px solid #20262e;
+      }
+      .save {
+        background: #34d399; color: #06210f; border: 0; border-radius: 9px;
+        padding: 10px 18px; font: inherit; font-weight: 700; cursor: pointer;
+      }
+      .save:hover { background: #4ae3aa; }
+      .status { color: #8497a8; font-size: 12.5px; }
+      .status.ok { color: #4ae3aa; }
+    </style>
+  </head>
+  <body>
+    <header><h1>Settings</h1></header>
+    <div class="intro" id="intro"></div>
+
+    <div class="form">
+      <div class="field">
+        <label class="row" for="provider">Speech engine</label>
+        <select id="provider">
+          <option value="openai">OpenAI (cloud)</option>
+          <option value="deepgram">Deepgram (cloud)</option>
+          <option value="whisper-local">Local Whisper (offline, on this Mac)</option>
+        </select>
+        <div class="hint">Cloud engines are fast and accurate but need an internet connection and an API key. Local Whisper runs entirely on your machine — no key, no internet, nothing leaves the computer.</div>
+      </div>
+
+      <div class="field">
+        <label class="row" for="language">Default language</label>
+        <select id="language">
+          <option value="auto">Detect automatically (Croatian or English)</option>
+          <option value="hr">Croatian</option>
+          <option value="en">English</option>
+        </select>
+        <div class="hint">You can also flip between these any time by tapping right Ctrl while the app is running.</div>
+      </div>
+
+      <div class="field">
+        <label class="check"><input type="checkbox" id="cleanupEnabled" /> Tidy up the text with AI</label>
+        <div class="hint">Adds punctuation, capitalization, and the odd bullet list, without changing your words. Takes a beat longer and uses your cleanup API key.</div>
+      </div>
+
+      <div class="field">
+        <label class="row" for="openaiKey">OpenAI API key</label>
+        <div class="keyrow">
+          <input type="password" id="openaiKey" autocomplete="off" spellcheck="false" placeholder="sk-…" />
+          <button class="reveal" type="button" data-target="openaiKey">Show</button>
+        </div>
+        <div class="hint">Used by the OpenAI engine (and the AI tidy-up, if you don't set a separate cleanup key).</div>
+      </div>
+
+      <div class="field">
+        <label class="row" for="deepgramKey">Deepgram API key</label>
+        <div class="keyrow">
+          <input type="password" id="deepgramKey" autocomplete="off" spellcheck="false" placeholder="Your Deepgram key" />
+          <button class="reveal" type="button" data-target="deepgramKey">Show</button>
+        </div>
+        <div class="hint">Only needed if you pick the Deepgram engine.</div>
+      </div>
+
+      <div class="field">
+        <label class="check"><input type="checkbox" id="recordingsEnabled" /> Keep a copy of recent recordings</label>
+        <div class="hint">Lets you play back or recover a dictation that didn't land. The clips sit unencrypted on this Mac, so turn this off if you'd rather keep nothing.</div>
+        <div class="inline" style="margin-top:10px">
+          <span>Delete recordings after</span>
+          <input type="number" id="retentionDays" min="0" max="365" />
+          <span>days <span class="hint" style="margin:0">(0 = keep until there are 50)</span></span>
+        </div>
+        <div style="margin-top:10px">
+          <button class="secondary" id="clearBtn" type="button">Delete all recordings now</button>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      <button class="save" id="saveBtn" type="button">Save</button>
+      <span class="status" id="status"></span>
+    </footer>
+
+    <script>
+      const el = (id) => document.getElementById(id);
+      const statusEl = el("status");
+
+      function fill(view) {
+        el("provider").value = view.provider;
+        el("language").value = view.language;
+        el("cleanupEnabled").checked = !!view.cleanupEnabled;
+        el("openaiKey").value = view.openaiKey || "";
+        el("deepgramKey").value = view.deepgramKey || "";
+        el("recordingsEnabled").checked = !!view.recordingsEnabled;
+        el("retentionDays").value = view.retentionDays;
+      }
+
+      function collect() {
+        return {
+          provider: el("provider").value,
+          language: el("language").value,
+          cleanupEnabled: el("cleanupEnabled").checked,
+          openaiKey: el("openaiKey").value,
+          deepgramKey: el("deepgramKey").value,
+          recordingsEnabled: el("recordingsEnabled").checked,
+          retentionDays: Number(el("retentionDays").value)
+        };
+      }
+
+      function setStatus(text, ok) {
+        statusEl.textContent = text;
+        statusEl.className = "status" + (ok ? " ok" : "");
+      }
+
+      el("saveBtn").addEventListener("click", async () => {
+        setStatus("Saving…", false);
+        try {
+          const view = await window.settingsBridge.save(collect());
+          fill(view);
+          setStatus("Saved. New settings apply to your next dictation.", true);
+        } catch (err) {
+          setStatus("Couldn't save — check the app and try again.", false);
+        }
+      });
+
+      el("clearBtn").addEventListener("click", async () => {
+        const removed = await window.settingsBridge.clearRecordings();
+        setStatus(removed ? `Deleted ${removed} recording${removed === 1 ? "" : "s"}.` : "No recordings to delete.", true);
+      });
+
+      for (const btn of document.querySelectorAll(".reveal")) {
+        btn.addEventListener("click", () => {
+          const input = el(btn.dataset.target);
+          const showing = input.type === "text";
+          input.type = showing ? "password" : "text";
+          btn.textContent = showing ? "Show" : "Hide";
+        });
+      }
+
+      window.settingsBridge.onIntro((intro) => {
+        const box = el("intro");
+        if (!intro || (!intro.firstRun && !intro.reason)) { box.style.display = "none"; return; }
+        box.textContent = intro.reason || "Welcome to GVoice.";
+        box.style.display = "block";
+      });
+
+      window.settingsBridge.get().then(fill);
+    </script>
+  </body>
+</html>

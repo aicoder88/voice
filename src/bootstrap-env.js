@@ -34,6 +34,10 @@ const envFile = join(HOME, ".env");
 if (existsSync(envFile)) dotenv.config({ path: envFile });
 else dotenv.config();
 
+// Exported so the rest of the app (main.js, the settings writer) edits the SAME
+// .env this loaded — never a cwd-relative guess that misses in a packaged launch.
+export const ENV_FILE = envFile;
+
 // Default the Whisper model to an absolute path under HOME if the user hasn't
 // pinned one — a cwd-relative "./models/…" would miss in a packaged launch.
 if (!process.env.WHISPER_MODEL) {

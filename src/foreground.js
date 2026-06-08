@@ -251,6 +251,27 @@ export function restoreForegroundWindow(hwndNum) {
   }
 }
 
+/**
+ * Is `hwnd` the window currently in the foreground? Used on Windows right AFTER
+ * a paste to confirm focus didn't get stolen mid-paste (which would send ⌘V/
+ * Ctrl+V somewhere other than the app the user dictated into). Returns null when
+ * we can't tell (non-Windows, or koffi unavailable) — callers must treat null as
+ * "couldn't verify", never as a failure.
+ *
+ * @param {number | null} hwnd
+ * @returns {boolean | null}
+ */
+export function isForegroundWindow(hwnd) {
+  if (!GetForegroundWindow || !hwnd) return null;
+  try {
+    const current = GetForegroundWindow();
+    return current ? Number(current) === Number(hwnd) : false;
+  } catch (err) {
+    console.error("[foreground] foreground compare failed:", err && err.message);
+    return null;
+  }
+}
+
 // VK_RMENU = 0xA5 (right Alt only — VK_MENU 0x12 would match either Alt).
 const VK_RMENU = 0xA5;
 // VK_RCONTROL = 0xA3 (right Ctrl only — VK_CONTROL 0x11 would match both).

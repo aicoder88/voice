@@ -27,6 +27,7 @@
 
 import { createRequire } from "node:module";
 import { isRightAltDown, isRightCtrlDown } from "./foreground.js";
+import { createTapDetector, createHoldTracker } from "./hotkey-logic.js";
 
 const require = createRequire(import.meta.url);
 
@@ -68,42 +69,36 @@ export function startHotkey(callbacks) {
 function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
   let altWas = false;
   let ctrlWas = false;
-  /** @type {number | null} */
-  let ctrlDownAt = null;
-  let ctrlChorded = false;
+  const hold = createHoldTracker({
+    onPress: () => {
+      debug("[hotkey] PRESS alt");
+      try { onPress?.("alt"); } catch (error) { console.error("hotkey onPress error:", error); }
+    },
+    onRelease: () => {
+      debug("[hotkey] RELEASE alt");
+      try { onRelease?.("alt"); } catch (error) { console.error("hotkey onRelease error:", error); }
+    }
+  });
+  const tap = createTapDetector({ windowMs: CTRL_TAP_WINDOW_MS });
 
   const tick = () => {
     const altNow = isRightAltDown();
     const ctrlNow = isRightCtrlDown();
 
     if (altNow && !altWas) {
-      if (ctrlDownAt !== null) ctrlChorded = true;
-      debug("[hotkey] PRESS alt");
-      try {
-        onPress?.("alt");
-      } catch (error) {
-        console.error("hotkey onPress error:", error);
-      }
+      // Alt going down while a Ctrl tap is open means it was a chord, not a tap.
+      tap.other();
+      hold.press("alt");
     } else if (!altNow && altWas) {
-      debug("[hotkey] RELEASE alt");
-      try {
-        onRelease?.("alt");
-      } catch (error) {
-        console.error("hotkey onRelease error:", error);
-      }
+      hold.release("alt");
     }
     altWas = altNow;
 
     if (ctrlNow && !ctrlWas) {
-      ctrlDownAt = Date.now();
-      ctrlChorded = false;
-    } else if (!ctrlNow && ctrlWas && ctrlDownAt !== null) {
-      const held = Date.now() - ctrlDownAt;
-      const wasTap = !ctrlChorded && held <= CTRL_TAP_WINDOW_MS;
-      ctrlDownAt = null;
-      ctrlChorded = false;
-      if (wasTap) {
-        debug("[hotkey] TAP ctrl (held=" + held + "ms)");
+      tap.down();
+    } else if (!ctrlNow && ctrlWas) {
+      if (tap.up()) {
+        debug("[hotkey] TAP ctrl");
         try {
           onToggleLanguage?.();
         } catch (error) {
@@ -196,36 +191,22 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
   // All hold-to-talk triggers share one press/release state. Dictation starts
   // when the first trigger goes down and stops when the last one is released,
   // so overlapping holds can't double-start or cut each other off.
-  /** @type {Set<string>} */
-  const sourcesHeld = new Set();
-  function pressSource(/** @type {string} */ name) {
-    if (sourcesHeld.has(name)) return; // auto-repeat
-    const wasIdle = sourcesHeld.size === 0;
-    sourcesHeld.add(name);
-    if (!wasIdle) return;
-    debug("[hotkey] PRESS (" + name + ")");
-    try {
-      onPress?.("alt");
-    } catch (error) {
-      console.error("hotkey onPress error:", error);
+  const hold = createHoldTracker({
+    onPress: (name) => {
+      debug("[hotkey] PRESS (" + name + ")");
+      try { onPress?.("alt"); } catch (error) { console.error("hotkey onPress error:", error); }
+    },
+    onRelease: (name) => {
+      debug("[hotkey] RELEASE (" + name + ")");
+      try { onRelease?.("alt"); } catch (error) { console.error("hotkey onRelease error:", error); }
     }
-  }
-  function releaseSource(/** @type {string} */ name) {
-    if (!sourcesHeld.delete(name)) return;
-    if (sourcesHeld.size > 0) return;
-    debug("[hotkey] RELEASE (" + name + ")");
-    try {
-      onRelease?.("alt");
-    } catch (error) {
-      console.error("hotkey onRelease error:", error);
-    }
-  }
+  });
+  const pressSource = (/** @type {string} */ name) => hold.press(name);
+  const releaseSource = (/** @type {string} */ name) => hold.release(name);
 
   let ctrlLDown = false;
   let cmdLDown = false;
-  /** @type {number | null} */
-  let ctrlDownAt = null;
-  let ctrlSawOtherKey = false;
+  const tap = createTapDetector({ windowMs: CTRL_TAP_WINDOW_MS });
 
   const handleDown = (/** @type {any} */ event) => {
     const code = event && event.keycode;
@@ -238,33 +219,32 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
       if (cmdLDown && event.metaKey === false) cmdLDown = false;
     }
     // Any hold-to-talk key counts as "another key" if the right-Ctrl tap
-    // window is open, so a chord involving right Ctrl never toggles language.
+    // window is open (tap.other() no-ops when it isn't), so a chord involving
+    // right Ctrl never toggles language.
     if (ALT_KEYCODES.has(code)) {
-      if (ctrlDownAt !== null) ctrlSawOtherKey = true;
+      tap.other();
       pressSource("alt");
       return;
     }
     if (CTRL_L_KEYCODES.has(code)) {
-      if (ctrlDownAt !== null) ctrlSawOtherKey = true;
+      tap.other();
       ctrlLDown = true;
       if (cmdLDown) pressSource("ctrlCmd");
       return;
     }
     if (CMD_L_KEYCODES.has(code)) {
-      if (ctrlDownAt !== null) ctrlSawOtherKey = true;
+      tap.other();
       cmdLDown = true;
       if (ctrlLDown) pressSource("ctrlCmd");
       return;
     }
     if (CTRL_R_KEYCODES.has(code)) {
-      if (ctrlDownAt !== null) return; // auto-repeat
-      ctrlDownAt = Date.now();
-      ctrlSawOtherKey = false;
+      tap.down(); // ignores auto-repeat internally
       return;
     }
     // Any other key cancels the in-progress Ctrl tap, so Ctrl-chord shortcuts
     // are not misread as a language toggle.
-    if (ctrlDownAt !== null) ctrlSawOtherKey = true;
+    tap.other();
   };
 
   const handleUp = (/** @type {any} */ event) => {
@@ -284,13 +264,8 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
       return;
     }
     if (CTRL_R_KEYCODES.has(code)) {
-      if (ctrlDownAt === null) return;
-      const held = Date.now() - ctrlDownAt;
-      const wasTap = !ctrlSawOtherKey && held <= CTRL_TAP_WINDOW_MS;
-      ctrlDownAt = null;
-      ctrlSawOtherKey = false;
-      if (wasTap) {
-        debug("[hotkey] TAP ctrl (held=" + held + "ms)");
+      if (tap.up()) {
+        debug("[hotkey] TAP ctrl");
         try {
           onToggleLanguage?.();
         } catch (error) {

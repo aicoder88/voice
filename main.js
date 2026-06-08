@@ -36,16 +36,19 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
-import { wrapWav } from "./src/providers/_shared.js";
 import * as vocab from "./src/vocab.js";
 import { createCorrectionWatcher } from "./src/correction-watch.js";
-import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, focusedFieldValue } from "./src/foreground.js";
+import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, focusedFieldValue, isForegroundWindow } from "./src/foreground.js";
 import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
+import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-local.js";
+import { ENV_FILE } from "./src/bootstrap-env.js";
+import { writeEnvFile, settingsView, patchFromView } from "./src/settings.js";
+import { saveRecording, pruneRecordings, clearRecordings } from "./src/recordings.js";
 import { appendFileSync, statSync, renameSync, unlinkSync, existsSync } from "node:fs";
-import { writeFile as writeFileAsync, readdir, unlink as unlinkAsync, rm as rmAsync, mkdir as mkdirAsync } from "node:fs/promises";
+import { mkdir as mkdirAsync } from "node:fs/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const envPath = join(__dirname, ".env");
+const envPath = ENV_FILE;
 
 /** @type {import("electron").BrowserWindow | null} */
 let splashWindow = null;
@@ -57,6 +60,8 @@ let dictationWindow = null;
 let vocabWindow = null;
 /** @type {import("electron").BrowserWindow | null} */
 let dictionaryWindow = null;
+/** @type {import("electron").BrowserWindow | null} */
+let settingsWindow = null;
 /** @type {string | null} */
 let recordingsDir = null;
 // The transcript + recording shown on the current result pill, so the pill's
@@ -183,6 +188,10 @@ async function bootRelayServer() {
   // The relay only needs OPENAI_API_KEY when the dictation window will
   // actually open an OpenAI WebSocket. whisper-local and deepgram providers
   // talk to their own backends, so don't gate boot on the OpenAI key.
+  // Clear any error from a previous (failed) attempt so a successful retry —
+  // e.g. after the user saves a key in Settings on first run — doesn't leave a
+  // stale "Missing …" string behind for a later code path to surface.
+  serverError = null;
   const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
   if (provider === "openai" && !process.env.OPENAI_API_KEY) {
     serverError = `Missing OPENAI_API_KEY in ${envPath}`;
@@ -409,7 +418,7 @@ function showPillForWindow(/** @type {number | null} */ _hwnd) {
 // applies to result states: { canCopy, canOpen }.
 function setPillState(
   /** @type {"listening" | "transcribing" | "success" | "error"} */ state,
-  /** @type {{ canCopy?: boolean, canOpen?: boolean }} */ opts = {}
+  /** @type {{ canCopy?: boolean, canOpen?: boolean, holdMs?: number }} */ opts = {}
 ) {
   if (!pillWindow || pillWindow.isDestroyed()) return;
   const size = PILL_SIZES[state] || PILL_SIZES.listening;
@@ -419,7 +428,8 @@ function setPillState(
   pillWindow.webContents.send("pill:state", {
     state,
     canCopy: !!opts.canCopy,
-    canOpen: !!opts.canOpen
+    canOpen: !!opts.canOpen,
+    holdMs: opts.holdMs
   });
 }
 
@@ -429,15 +439,22 @@ function setPillState(
 function showPillResult(
   /** @type {"success" | "error"} */ state,
   /** @type {string | null} */ transcript,
-  /** @type {string | null} */ recordingPath
+  /** @type {string | null} */ recordingPath,
+  /** @type {{ uncertain?: boolean }} */ opts = {}
 ) {
   currentTranscript = transcript;
   currentRecordingPath = recordingPath;
-  setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath });
+  // How long the pill lingers before the renderer auto-hides it. A confirmed
+  // success clears quickly (6s — it worked, get out of the way). An error, or a
+  // success we COULDN'T confirm landed (no readable field to verify against, the
+  // common case in browsers / Slack / editors), lingers 30s so the user has time
+  // to read it and click Copy / Open if the paste actually missed.
+  const holdMs = state === "error" || opts.uncertain ? 30000 : 6000;
+  setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath, holdMs });
   pillWindow?.showInactive();
-  // Renderer auto-hides the pill itself (3s success / 8s error, pill.html).
-  // These are only crash backstops in case the renderer never reports back.
-  armPillSafetyHide(state === "error" ? 45000 : 12000);
+  // Crash backstop only — must outlive the renderer's own timer so it never
+  // cuts the pill short. Normal completions clear it via hidePill() first.
+  armPillSafetyHide(holdMs + 15000);
 }
 
 let pillSafetyTimer = null;
@@ -609,6 +626,61 @@ function openDictionaryWindow() {
   }
 }
 
+// The Settings window — a normal, focusable window (tray → "Settings…", and
+// opened automatically on first run when a required key/model is missing). Lets
+// the user pick the speech engine, default language, cleanup, API keys, and
+// recording privacy without hand-editing the .env file. `firstRun` shows a short
+// welcome line; `reason` (optional) explains what's missing.
+function openSettingsWindow(opts = {}) {
+  // Accessory app (Dock hidden) — pull the app forward so the text fields accept
+  // typing, same as the dictionary window.
+  app.focus({ steal: true });
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show();
+    settingsWindow.focus();
+    if (opts.firstRun || opts.reason) sendSettingsIntro(opts);
+    return;
+  }
+  settingsWindow = new BrowserWindow({
+    width: 480,
+    height: 620,
+    title: "GVoice settings",
+    show: true,
+    resizable: true,
+    maximizable: false,
+    fullscreenable: false,
+    backgroundColor: "#14181e",
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: join(__dirname, "preload-settings.cjs")
+    }
+  });
+  settingsWindow.on("closed", () => { settingsWindow = null; });
+  settingsWindow.webContents.once("did-finish-load", () => {
+    if (settingsWindow && !settingsWindow.isDestroyed()) {
+      settingsWindow.focus();
+      sendSettingsIntro(opts);
+    }
+  });
+  if (serverPort) {
+    settingsWindow.loadURL(`http://localhost:${serverPort}/settings.html`);
+  } else {
+    settingsWindow.loadFile(join(__dirname, "public", "settings.html"));
+  }
+}
+
+// Push the first-run welcome / "what's missing" note to the settings renderer.
+function sendSettingsIntro(opts = {}) {
+  if (!settingsWindow || settingsWindow.isDestroyed()) return;
+  if (!opts.firstRun && !opts.reason) return;
+  settingsWindow.webContents.send("settings:intro", {
+    firstRun: !!opts.firstRun,
+    reason: opts.reason || ""
+  });
+}
+
 function createDictationWindow() {
   if (!serverPort) return;
   dictationWindow = new BrowserWindow({
@@ -724,7 +796,7 @@ async function setupHotkey() {
 //
 // @param {string} transcript
 // @param {number | null} [restoreHwnd]
-// @returns {Promise<{ text: string, pasted: boolean } | null>}
+// @returns {Promise<{ text: string, pasted: boolean, verified: boolean | null } | null>}
 async function processTranscript(transcript, restoreHwnd = null) {
   if (!transcript || !transcript.trim()) return null;
   let textToType = stripWhisperNoiseTokens(transcript.trim());
@@ -789,6 +861,19 @@ async function processTranscript(transcript, restoreHwnd = null) {
     typed &&
     !(restoreHwnd != null && restored === false) &&
     fieldFocused !== false;
+  // Windows paste verification: confirm focus is STILL the window we restored to
+  // right after sending Ctrl+V. If another app grabbed the foreground mid-paste,
+  // the keystroke went somewhere else — downgrade so the text stays recoverable
+  // from the pill instead of a false "Success". isForegroundWindow returns null
+  // off Windows (and when koffi is unavailable), which we never hold against a
+  // paste. This is the Windows counterpart to macOS's AX focus/read-back check.
+  if (pasted && process.platform === "win32" && restoreHwnd != null) {
+    const stillForeground = isForegroundWindow(restoreHwnd);
+    if (stillForeground === false) {
+      pasted = false;
+      dlog("paste-foreground-lost", { hwnd: restoreHwnd });
+    }
+  }
   // Post-paste verification (macOS, best-effort): re-read the focused field and
   // check our text actually appeared in it. Only DOWNGRADE on a readable string
   // that's missing the text — null means "couldn't verify" (web areas, secure
@@ -810,34 +895,47 @@ async function processTranscript(transcript, restoreHwnd = null) {
   }
   debug("[main] paste done (" + (Date.now() - tType) + "ms paste, restored=" + restored + ", fieldFocused=" + fieldFocused + ", verified=" + verified + ", pasted=" + pasted + ")");
   dlog("typed", { len: textToType.length, ms: Date.now() - tType, fieldFocused, pasted });
-  return { text: textToType, pasted };
+  // verified: true = read back and confirmed, false = read back and missing
+  // (already downgraded pasted), null = couldn't read the field to check.
+  return { text: textToType, pasted, verified };
 }
 
-// Write the just-captured audio to the temporary recordings folder so the
-// pill's "Open recording" button has a file to open. Only the most recent clip
-// is kept (the previous one is deleted), and the whole folder is wiped at boot
-// — these are throwaway, "open it before you restart" recordings, not the
-// long-lived backups the old failure pop-up kept. Returns the path, or null.
+// How many recent recordings to keep on disk — matched to the history length so
+// every dictation in the tray's "Recent dictations" list can still be played.
+const MAX_RECORDINGS = 50;
+
+// Privacy controls for the saved recordings (everything the user dictated sits
+// here unencrypted). RECORDINGS_ENABLED=false turns saving off entirely;
+// RECORDING_RETENTION_DAYS bounds how long clips linger on top of the count cap.
+// Both are read fresh each call so a Settings change applies without a restart.
+function recordingsEnabled() {
+  return !/^(false|0|no|off)$/i.test(String(process.env.RECORDINGS_ENABLED ?? "true").trim());
+}
+function recordingMaxAgeMs() {
+  const days = Number(process.env.RECORDING_RETENTION_DAYS ?? 7);
+  if (!Number.isFinite(days) || days <= 0) return 0; // 0 = no age cap
+  return days * 24 * 60 * 60 * 1000;
+}
+
+// Write the just-captured audio to the recordings folder so the pill's "Open
+// recording" button and the tray's "Play recording" items have a file to open.
+// Clips are pruned by BOTH a count cap (MAX_RECORDINGS) and an age cap, and they
+// survive a restart. Returns the path, or null (nothing to save, or the user
+// turned recording off).
 //
 // @param {string[]} chunks   base64 PCM16 frames
 // @param {number} [sampleRate]
 // @returns {Promise<string | null>}
 async function saveTempRecording(chunks, sampleRate) {
-  if (!recordingsDir || !chunks || !chunks.length) return null;
+  if (!recordingsDir || !chunks || !chunks.length || !recordingsEnabled()) return null;
   try {
     const pcm = Buffer.concat(chunks.map((b64) => Buffer.from(b64, "base64")));
     if (!pcm.length) return null;
-    // Keep only the latest clip — drop any earlier ones from this session.
-    const existing = await readdir(recordingsDir).catch(() => []);
-    await Promise.all(
-      existing
-        .filter((n) => n.endsWith(".wav"))
-        .map((n) => unlinkAsync(join(recordingsDir, n)).catch(() => {}))
-    );
-    const name = `dictation-${Date.now()}.wav`;
-    const path = join(recordingsDir, name);
-    await writeFileAsync(path, wrapWav(pcm, sampleRate || 24000));
-    dlog("temp-recording", { name, bytes: pcm.length });
+    const path = await saveRecording(recordingsDir, pcm, sampleRate || 24000, {
+      maxCount: MAX_RECORDINGS,
+      maxAgeMs: recordingMaxAgeMs()
+    });
+    dlog("temp-recording", { bytes: pcm.length });
     return path;
   } catch (error) {
     console.error("[main] Failed to save temp recording:", error && (error.stack || error.message));
@@ -856,12 +954,21 @@ function setupIpc() {
     debug("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(text));
     dlog("transcript", { len: (text || "").trim().length, sinceRelease });
 
-    // Empty transcript = silence, a filtered hallucination, or a misfire
-    // (too-short hold). Just hide the pill quietly — surfacing "Error" on every
-    // accidental tap would be noise. Reopen the session immediately so the next
-    // press works right away.
+    // Empty transcript. If the renderer still sent the captured audio, this was
+    // a real attempt that came back blank (mis-recognition, both auto-language
+    // legs silent, a flush race) — save the recording and show an Error pill so
+    // the user knows it failed and can listen to what they said. If there's no
+    // audio (a too-short accidental tap), hide quietly; an Error on every
+    // misfire would just be noise.
     if (!text || !text.trim()) {
-      hidePill();
+      if (chunks && chunks.length) {
+        const failedPath = await saveTempRecording(chunks, sampleRate);
+        showPillResult("error", null, failedPath);
+        recordTranscript("", false, failedPath);
+        rebuildTrayMenu();
+      } else {
+        hidePill();
+      }
       dictation.done();
       return;
     }
@@ -882,10 +989,18 @@ function setupIpc() {
       } else {
         // Success only when we're confident the text was pasted somewhere;
         // otherwise show Error so the user can Copy it / open the recording.
-        showPillResult(result.pasted ? "success" : "error", result.text, recordingPath);
+        // A success we couldn't verify landed (verified !== true) lingers like an
+        // error so a silent miss is still recoverable from the pill.
+        showPillResult(
+          result.pasted ? "success" : "error",
+          result.text,
+          recordingPath,
+          { uncertain: result.pasted && result.verified !== true }
+        );
         // Keep the last 50 dictations on disk and in the tray menu, so a
-        // missed paste is recoverable even after the pill is gone.
-        recordTranscript(result.text, result.pasted);
+        // missed paste is recoverable — and listenable — even after the pill is
+        // gone.
+        recordTranscript(result.text, result.pasted, recordingPath);
         rebuildTrayMenu();
         // Failed paste: also put the text on the clipboard so it's recoverable
         // with ⌘V even if the pill is missed. Delayed past typeText's 250ms
@@ -904,7 +1019,7 @@ function setupIpc() {
       showPillResult("error", text, recordingPath);
       // Cleanup never ran on this path — at least strip Whisper noise tokens
       // so the history entry matches the others as closely as possible.
-      recordTranscript(stripWhisperNoiseTokens(text.trim()) || text, false);
+      recordTranscript(stripWhisperNoiseTokens(text.trim()) || text, false, recordingPath);
       rebuildTrayMenu();
     } finally {
       dictation.done();
@@ -919,8 +1034,13 @@ function setupIpc() {
     const chunks = (payload && payload.chunks) || [];
     const recordingPath = await saveTempRecording(chunks, payload && payload.sampleRate);
     if (recordingPath) console.error("[main] dictation recording saved:", recordingPath);
-    // No transcript to copy; the recording is what we offer.
+    // No transcript to copy; the recording is what we offer. Log it in the
+    // history too so the user can come back and listen via the tray.
     showPillResult("error", null, recordingPath);
+    if (recordingPath) {
+      recordTranscript("", false, recordingPath);
+      rebuildTrayMenu();
+    }
   });
 
   ipcMain.on("dictation:error", (_event, message) => {
@@ -975,6 +1095,46 @@ function setupIpc() {
     return vocab.getTerms();
   });
 
+  // Settings window (request/response). get returns the current view; save
+  // writes the .env, applies the change live, and returns the fresh view.
+  ipcMain.handle("settings:get", () => settingsView(process.env));
+  ipcMain.handle("settings:save", async (_event, payload) => {
+    const patch = patchFromView(payload || {});
+    const prevProvider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+    try {
+      writeEnvFile(envPath, patch);
+    } catch (err) {
+      console.error("[main] settings write failed:", err && err.message);
+    }
+    // Apply live so the next dictation honors the change without a restart. The
+    // relay reads keys fresh per connection (see realtime-relay.js); the
+    // dictation renderer reads the provider from its URL, so reload it on a
+    // provider switch.
+    for (const [key, value] of Object.entries(patch)) process.env[key] = value;
+    const newProvider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+    dlog("settings-save", { keys: Object.keys(patch), providerChanged: newProvider !== prevProvider });
+
+    if (!serverPort) {
+      // First-run path: the relay never booted (no key at launch). Now that a
+      // key may be present, try again and bring dictation fully up.
+      await bootRelayServer();
+      if (serverPort) await bringUpDictation();
+    } else if (newProvider !== prevProvider) {
+      reloadDictationWindow();
+    }
+    updateTrayTooltip();
+    rebuildTrayMenu();
+    return settingsView(process.env);
+  });
+  // Delete every saved recording (the privacy "wipe my voice clips" button).
+  ipcMain.handle("settings:clear-recordings", async () => {
+    if (!recordingsDir) return 0;
+    const removed = await clearRecordings(recordingsDir);
+    dlog("recordings-cleared", { removed });
+    rebuildTrayMenu();
+    return removed;
+  });
+
   // The renderer lost the microphone (disconnected, muted, seized by another
   // app, or silent for several holds in a row) and rebuilt its capture. Make
   // the failure visible instead of silently typing nothing.
@@ -1016,18 +1176,34 @@ function createTray() {
 function rebuildTrayMenu() {
   if (!tray) return;
 
-  // One submenu row per saved dictation, newest first: time + a preview.
-  // Clicking a row copies the full text to the clipboard.
-  const historyItems = getHistory().map((entry) => {
+  // One row per saved dictation, newest first: time + a preview. Each opens a
+  // submenu to copy the text or play the recording (whichever exists). A failed
+  // attempt has no text — only the recording to listen back to.
+  const history = getHistory();
+  const historyItems = history.map((entry) => {
     const time = new Date(entry.ts).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
     // Newlines break NSMenu labels (display cuts at the first one) — flatten.
-    const flat = entry.text.replace(/\s+/g, " ").trim();
-    const preview = flat.length > 60 ? flat.slice(0, 60) + "…" : flat;
+    const flat = (entry.text || "").replace(/\s+/g, " ").trim();
+    const preview = flat
+      ? (flat.length > 60 ? flat.slice(0, 60) + "…" : flat)
+      : "(no transcript — recording only)";
+    const hasRecording = !!entry.recordingPath && existsSync(entry.recordingPath);
+    /** @type {import("electron").MenuItemConstructorOptions[]} */
+    const sub = [];
+    if (flat) sub.push({ label: "Copy text", click: () => clipboard.writeText(entry.text) });
+    sub.push({
+      label: hasRecording ? "Play recording" : "Recording unavailable",
+      enabled: hasRecording,
+      click: () => { if (entry.recordingPath) shell.openPath(entry.recordingPath).catch(() => {}); }
+    });
     return {
       label: `${time}${entry.pasted ? "" : " ⚠"}  ${preview}`,
-      click: () => clipboard.writeText(entry.text)
+      submenu: sub
     };
   });
+
+  // The newest saved recording, for the one-click "play my last attempt" item.
+  const lastRecording = history.find((e) => e.recordingPath && existsSync(e.recordingPath));
 
   const menu = Menu.buildFromTemplate([
     {
@@ -1041,6 +1217,14 @@ function rebuildTrayMenu() {
           click: () => { const p = getHistoryPath(); if (p) shell.showItemInFolder(p); }
         }
       ]
+    },
+    {
+      label: "Play last recording",
+      enabled: !!lastRecording,
+      click: () => {
+        const p = lastRecording && lastRecording.recordingPath;
+        if (p) shell.openPath(p).catch(() => {});
+      }
     },
     { type: "separator" },
     {
@@ -1061,6 +1245,23 @@ function rebuildTrayMenu() {
       // should spell exactly, and review or remove existing ones.
       label: "Manage dictionary…",
       click: () => openDictionaryWindow()
+    },
+    {
+      // Engine, language, cleanup, API keys, and recording privacy.
+      label: "Settings…",
+      click: () => openSettingsWindow()
+    },
+    {
+      // Delete the saved voice clips on disk (privacy). Enabled whenever the
+      // folder exists — clips can linger on disk even when none are in the
+      // (capped, in-memory) history, and the wipe should still reach them.
+      label: "Clear recordings",
+      enabled: !!recordingsDir,
+      click: async () => {
+        if (!recordingsDir) return;
+        await clearRecordings(recordingsDir);
+        rebuildTrayMenu();
+      }
     },
     { type: "separator" },
     {
@@ -1104,6 +1305,59 @@ function buildAppMenu() {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
+// Bring up the live dictation machinery: the pill, the vocab pop-up, the hidden
+// dictation renderer, and the global hotkey. Idempotent — guarded so the
+// first-run "save your key" path can call it after the relay finally boots
+// without double-creating windows. `onReady` fires once the dictation renderer
+// has loaded and the hotkey is armed.
+let dictationBroughtUp = false;
+async function bringUpDictation(onReady) {
+  if (!serverPort) return;
+  if (dictationBroughtUp) { onReady?.(); return; }
+  dictationBroughtUp = true;
+  createPillWindow();
+  createVocabWindow();
+  createDictationWindow();
+  if (!dictationWindow) return;
+  dictationWindow.webContents.once("did-finish-load", async () => {
+    await setupHotkey();
+    onReady?.();
+  });
+}
+
+// Reload the hidden dictation renderer pointed at the current provider. The
+// provider is carried in the URL query and read once at renderer load, so a
+// Settings change to the engine takes effect by reloading (the hotkey closures
+// reference the module-level dictationWindow, so they keep working). No-op if
+// the window isn't up yet.
+function reloadDictationWindow() {
+  if (!serverPort || !dictationWindow || dictationWindow.isDestroyed()) return;
+  const provider = encodeURIComponent((process.env.STT_PROVIDER || "openai").toLowerCase());
+  dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html?provider=${provider}`);
+}
+
+// First-run / misconfiguration check: returns a short, plain-English reason the
+// app can't dictate yet (no .env, or the active engine's key/model is missing),
+// or null when everything needed is present. Drives the auto-opened Settings
+// window so a fresh install guides the user instead of silently doing nothing.
+function needsOnboarding() {
+  if (!existsSync(envPath)) {
+    return "Welcome to GVoice. Add your speech engine details below to start dictating.";
+  }
+  const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+  if (provider === "openai" && !process.env.OPENAI_API_KEY) {
+    return "Add your OpenAI API key to start dictating.";
+  }
+  if (provider === "deepgram" && !process.env.DEEPGRAM_API_KEY) {
+    return "Add your Deepgram API key to start dictating.";
+  }
+  if ((provider === "whisper-local" || provider === "local") &&
+      !(process.env.WHISPER_MODEL && existsSync(process.env.WHISPER_MODEL))) {
+    return "Point GVoice at a local Whisper model file to dictate offline.";
+  }
+  return null;
+}
+
 app.whenReady().then(async () => {
   // The very first thing on screen: a branded splash, not a terminal or a bare
   // window. It reports boot progress and later tucks itself into the tray.
@@ -1116,13 +1370,16 @@ app.whenReady().then(async () => {
   if (process.platform === "darwin") {
     app.dock?.hide();
   }
-  // Temporary recordings live here. They're throwaway — the pill's "Open
-  // recording" button opens the latest clip, and the whole folder is wiped at
-  // every boot ("erased on restart"). Recreated empty so the first dictation
-  // has somewhere to write.
+  // Recent recordings live here. The pill's "Open recording" button and the
+  // tray's "Play recording" / "Play last recording" items open them, so they
+  // persist across restarts (the last MAX_RECORDINGS clips are kept, older ones
+  // pruned as new ones are saved — see saveTempRecording). Created if missing.
   recordingsDir = join(app.getPath("userData"), "temp-recordings");
-  await rmAsync(recordingsDir, { recursive: true, force: true }).catch(() => {});
   await mkdirAsync(recordingsDir, { recursive: true }).catch(() => {});
+  // Enforce the count + age caps at boot too, so clips that aged out while the
+  // app was closed (or a freshly-lowered retention setting) are cleared now, not
+  // only as new recordings are saved.
+  await pruneRecordings(recordingsDir, { maxCount: MAX_RECORDINGS, maxAgeMs: recordingMaxAgeMs() }).catch(() => {});
   // Custom dictionary lives in userData so it survives reinstalls/updates and
   // isn't bundled into the read-only app. The providers read it on every
   // connection; the cursor pop-up writes to it.
@@ -1135,17 +1392,19 @@ app.whenReady().then(async () => {
   await bootRelayServer();
   buildAppMenu();
   createTray();
+  setupIpc();
+
+  // First run / misconfiguration: guide the user to Settings instead of silently
+  // doing nothing. The tray stays live either way.
+  const onboard = needsOnboarding();
+
   if (serverPort) {
-    createPillWindow();
-    createVocabWindow();
-    createDictationWindow();
     setSplashStatus("Connecting to your speech engine…");
     // Backstop: if the dictation window's load never completes (relay route
     // hangs, renderer crash), still tuck the splash away instead of leaving it
     // pinned on screen. The normal ready path below fires well before this.
     setTimeout(dismissSplashToTray, 9000);
-    dictationWindow.webContents.once("did-finish-load", async () => {
-      await setupHotkey();
+    await bringUpDictation(() => {
       // Fully live now: flip the splash to its "ready" look, let it land for a
       // beat, then animate it down into the tray and disappear.
       const holdKey = process.platform === "darwin" ? "right Option" : "right Alt";
@@ -1155,24 +1414,33 @@ app.whenReady().then(async () => {
   } else {
     // Relay couldn't start (usually a missing API key). Surface it on the
     // splash instead of failing silently, then tuck it away — the tray stays.
-    setSplashStatus(serverError || "Couldn't start. Check your settings.", "error");
-    setTimeout(dismissSplashToTray, 4500);
+    setSplashStatus(onboard || serverError || "Couldn't start. Check your settings.", onboard ? "loading" : "error");
+    setTimeout(dismissSplashToTray, onboard ? 1800 : 4500);
   }
-  setupIpc();
 
-  // Warm whisper-server at boot so the first dictation doesn't pay the
-  // 3-second model-load cost. Falls back to CLI silently if it can't spawn.
+  // Open Settings on first run (or when the active engine is missing its key /
+  // model) so a fresh install isn't a dead end. Saving a working key there boots
+  // the relay and brings dictation up without a restart (see settings:save).
+  if (onboard) openSettingsWindow({ firstRun: true, reason: onboard });
+
+  // Warm whisper-server at boot so the first dictation doesn't pay the model
+  // load cost — and so any server orphaned by a previous crash is reaped now,
+  // not on the first dictation. One retry covers a transient spawn hiccup;
+  // after that the per-dictation path still falls back to whisper-cli.
   const provider = (process.env.STT_PROVIDER || "openai").toLowerCase();
   if (provider === "whisper-local" || provider === "local") {
-    try {
-      const { ensureWhisperServer } = await import("./src/providers/whisper-local.js");
-      const bin = process.env.WHISPER_BIN || process.env.WHISPER_CLI || "whisper-cli";
-      await ensureWhisperServer(bin);
-      dlog("whisper", "warmed at boot");
-      console.error("[main] whisper-server warmed at boot");
-    } catch (err) {
-      dlog("whisper", "warm failed: " + (err && err.message));
-      console.error("[main] whisper warm failed:", err && err.message);
+    const bin = process.env.WHISPER_BIN || process.env.WHISPER_CLI || "whisper-cli";
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        await ensureWhisperServer(bin);
+        dlog("whisper", "warmed at boot");
+        console.error("[main] whisper-server warmed at boot");
+        break;
+      } catch (err) {
+        dlog("whisper", "warm attempt " + attempt + " failed: " + (err && err.message));
+        console.error("[main] whisper warm attempt " + attempt + " failed:", err && err.message);
+        if (attempt < 2) await new Promise((r) => setTimeout(r, 500));
+      }
     }
   }
 
@@ -1182,14 +1450,30 @@ app.on("window-all-closed", (event) => {
   event.preventDefault();
 });
 
-app.on("before-quit", async () => {
-  isQuitting = true;
+// Shut everything this app started back down: hotkey listener, correction
+// watcher, and the local whisper-server (so the model never lingers in memory
+// after the app is closed). Synchronous so it completes even if the app exits
+// immediately after.
+function shutdownAll() {
   if (hotkeyEngine && typeof hotkeyEngine.stop === "function") {
     try { hotkeyEngine.stop(); } catch {}
   }
   try { correctionWatcher.stop(); } catch {}
-  try {
-    const { stopWhisperServer } = await import("./src/providers/whisper-local.js");
-    stopWhisperServer();
-  } catch {}
+  try { stopWhisperServer(); } catch {}
+}
+
+app.on("before-quit", () => {
+  isQuitting = true;
+  shutdownAll();
 });
+
+// Terminal-launched runs (dev / debugging) don't get 'before-quit' on Ctrl-C or
+// a kill — tear down the whisper-server here too so no orphan is left behind.
+for (const sig of /** @type {const} */ (["SIGINT", "SIGTERM"])) {
+  process.on(sig, () => {
+    shutdownAll();
+    app.quit();
+    // If the event loop is already unwinding, make sure we actually exit.
+    setTimeout(() => process.exit(0), 300).unref?.();
+  });
+}
