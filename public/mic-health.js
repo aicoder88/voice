@@ -24,6 +24,8 @@
  * @param {number} p.silencePeak  peak at/under which a long hold counts as "silent"
  * @param {number} p.silentStreak consecutive silent holds BEFORE this one
  * @param {number} p.streakLimit  this many silent holds in a row ⇒ dead mic
+ * @param {number} [p.holdMs]     how long the key was held (0/absent = unknown)
+ * @param {number} [p.minHoldMs]  a hold at least this long with ~no bytes ⇒ dead
  * @returns {{ action: "ignore" | "ok" | "silent" | "dead", silentStreak: number }}
  *   "dead"   ⇒ rebuild the capture pipeline now (zero peak, or the streak hit);
  *   "silent" ⇒ a silent hold counted toward the streak, not yet dead;
@@ -31,7 +33,13 @@
  *   "ignore" ⇒ too short to judge.
  *   `silentStreak` is the new running count to carry into the next hold.
  */
-export function classifyHold({ bytes, peak, minBytes, silencePeak, silentStreak, streakLimit }) {
+export function classifyHold({ bytes, peak, minBytes, silencePeak, silentStreak, streakLimit, holdMs = 0, minHoldMs = 1000 }) {
+  // No (or almost no) bytes despite a long hold: the pipeline delivered no
+  // frames AT ALL — a wedge the peak checks below can never see, because they
+  // need frames to arrive. A half-built graph after a failed rebuild looks
+  // exactly like this. The byte gate alone would file it as a tap forever.
+  if (bytes < minBytes && holdMs >= minHoldMs) return { action: "dead", silentStreak: 0 };
+
   // A tap, not a held dictation — nothing to judge, leave the streak untouched.
   if (bytes < minBytes) return { action: "ignore", silentStreak };
 

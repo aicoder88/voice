@@ -22,7 +22,7 @@ if (!app.requestSingleInstanceLock()) {
 app.on("second-instance", () => {
   // Headless app — there's no main window to refocus, just flash the tray
   // tooltip so the user knows the existing instance acknowledged them.
-  if (tray) tray.displayBalloon?.({ title: "GVoice", content: "Already running. Hold right Alt to dictate." });
+  if (tray) tray.displayBalloon?.({ title: "GVoice", content: "Already running. Hold Ctrl+Shift to dictate." });
 });
 
 process.on("uncaughtException", (err) => {
@@ -52,7 +52,7 @@ import { writeEnvFile, settingsView, patchFromView } from "./src/settings.js";
 import { probeCapability, recommendedAssets } from "./src/hardware.js";
 import { suggestBeforeBenchmark } from "./src/benchmark.js";
 import { runLocalBenchmark } from "./src/benchmark-run.js";
-import { ensureModel, ensureWindowsBinaries, MODELS } from "./src/model-download.js";
+import { ensureModel, ensureWindowsBinaries, MODELS, WINDOWS_BINARY_ZIPS } from "./src/model-download.js";
 import { saveRecording, pruneRecordings, clearRecordings } from "./src/recordings.js";
 import { appendFileSync, statSync, renameSync, unlinkSync, existsSync, mkdirSync } from "node:fs";
 import { mkdir as mkdirAsync } from "node:fs/promises";
@@ -89,8 +89,17 @@ let serverPort = null;
 let serverError = null;
 /** @type {{ stop: () => void } | null} */
 let hotkeyEngine = null;
+// True when the global hotkey failed to start. Without it the app LOOKS alive
+// (tray, splash "Ready") while every key-hold silently does nothing — so the
+// tooltip and splash must tell the truth instead.
+let hotkeyFailed = false;
 let isQuitting = false;
-const dictation = new DictationSession();
+// The busy guard must outlive the renderer's 20s transcriber watchdog
+// (public/dictation.js FAILURE_MS): with the old 500ms default it expired on
+// nearly every dictation, so a second press mid-transcription wiped
+// savedForegroundHwnd and could paste into the wrong window. A terminal event
+// always ends the session sooner; this is only the anti-jam backstop.
+const dictation = new DictationSession({ safetyTimeoutMs: 25000 });
 
 // The diagnostic log MUST live in userData, not next to main.js. When the app
 // is packaged, __dirname is inside the read-only .app/.asar bundle, so the old
@@ -467,7 +476,13 @@ function setPillState(
   const size = PILL_SIZES[state] || PILL_SIZES.listening;
   positionPill(size.width, size.height);
   const interactive = state === "success" || state === "error";
-  pillWindow.setIgnoreMouseEvents(!interactive);
+  // Result states stay click-through but FORWARD mouse moves to the renderer,
+  // which flips real interactivity on only while the pointer is over the
+  // visible pill (pill:set-interactive). Without forwarding, the invisible
+  // margins of the fixed 480px window would eat clicks at the bottom-center
+  // of the screen for the whole 6–30s linger.
+  if (interactive) pillWindow.setIgnoreMouseEvents(true, { forward: true });
+  else pillWindow.setIgnoreMouseEvents(true);
   pillWindow.webContents.send("pill:state", {
     state,
     canCopy: !!opts.canCopy,
@@ -807,7 +822,12 @@ function toggleLanguage() {
 function updateTrayTooltip() {
   if (!tray) return;
   const lang = getCurrentLanguage();
-  const keyLabel = process.platform === "darwin" ? "right Option" : "right Alt";
+  if (hotkeyFailed) {
+    tray.setToolTip("GVoice — the dictation key couldn't start.\nQuit and reopen the app. Details: debug.log");
+    try { tray.setImage(makeTrayIcon(lang)); } catch {}
+    return;
+  }
+  const keyLabel = process.platform === "darwin" ? "right Option" : "Ctrl+Shift";
   tray.setToolTip(
     `Language: ${languageLabel(lang)}\n` +
     `Hold ${keyLabel} to dictate.\n` +
@@ -817,7 +837,7 @@ function updateTrayTooltip() {
 }
 
 async function setupHotkey() {
-  if (!serverPort || !dictationWindow) return;
+  if (!serverPort || !dictationWindow) return false;
   try {
     const fireRelease = (/** @type {string} */ source) => {
       if (!dictation.release()) return;
@@ -829,7 +849,10 @@ async function setupHotkey() {
       // (transcript / failure / error) flips it to success/error; the safety
       // timer covers a renderer that never reports back.
       setPillState("transcribing");
-      armPillSafetyHide();
+      // Must outlive the renderer's 20s FAILURE_MS watchdog, or the
+      // transcribing pill vanishes mid-work and the result pops up later
+      // with no context.
+      armPillSafetyHide(25000);
     };
 
     const mod = await import("./src/hotkey.js");
@@ -860,8 +883,22 @@ async function setupHotkey() {
       ? "right Option (⌥), left Ctrl+Cmd, or mouse back button"
       : "Ctrl+Shift (either side)";
     console.log(`Global hotkeys active: hold ${altLabel} to dictate, tap right Ctrl to toggle hr/en.`);
+    return true;
   } catch (error) {
+    hotkeyFailed = true;
     console.error("Failed to start global hotkey:", error.message);
+    dlog("hotkey-failed", error && (error.stack || error.message));
+    // The app would otherwise look alive while every key-hold does nothing.
+    updateTrayTooltip();
+    try {
+      if (Notification.isSupported()) {
+        new Notification({
+          title: "GVoice — the dictation key couldn't start",
+          body: "Quit and reopen the app. Details are in debug.log."
+        }).show();
+      }
+    } catch {}
+    return false;
   }
 }
 
@@ -1045,7 +1082,9 @@ function setupIpc() {
     if (!text || !text.trim()) {
       if (chunks && chunks.length) {
         const failedPath = await saveTempRecording(chunks, sampleRate);
-        showPillResult("error", null, failedPath, { reason: "No speech detected — recording saved." });
+        // Only claim a recording was saved when one actually was (saving can
+        // be off in Settings, or the write can fail).
+        showPillResult("error", null, failedPath, { reason: failedPath ? "No speech detected — recording saved." : "No speech detected." });
         recordTranscript("", false, failedPath);
         rebuildTrayMenu();
       } else {
@@ -1081,7 +1120,9 @@ function setupIpc() {
             uncertain: result.pasted && result.verified !== true,
             // Only the hard-miss case gets an explanatory reason; a confirmed
             // success keeps the plain "Success" label.
-            reason: result.pasted ? "" : "Couldn't paste it — click Copy to grab the text."
+            // Action first: the label can ellipsize, so the instruction must
+            // survive truncation.
+            reason: result.pasted ? "" : "Click Copy — the paste didn't land."
           }
         );
         // Keep the last 50 dictations on disk and in the tray menu, so a
@@ -1124,7 +1165,7 @@ function setupIpc() {
     // The renderer sends a plain-English reason ("didn't respond in time", "lost
     // the connection…"); show it on the pill. No transcript to copy; the
     // recording is what we offer. Logged in history too for tray playback.
-    const reason = (payload && payload.reason) || "Couldn't transcribe — recording saved.";
+    const reason = (payload && payload.reason) || (recordingPath ? "Couldn't transcribe — recording saved." : "Couldn't transcribe.");
     showPillResult("error", null, recordingPath, { reason });
     if (recordingPath) {
       recordTranscript("", false, recordingPath);
@@ -1155,6 +1196,13 @@ function setupIpc() {
     }
   });
   ipcMain.on("pill:hide", () => hidePill());
+  // Pointer entered/left the visible pill (renderer detects it from the
+  // forwarded mouse moves). On=real clicks land; off=back to forward-only.
+  ipcMain.on("pill:set-interactive", (_event, on) => {
+    if (!pillWindow || pillWindow.isDestroyed()) return;
+    if (on) pillWindow.setIgnoreMouseEvents(false);
+    else pillWindow.setIgnoreMouseEvents(true, { forward: true });
+  });
 
   // Cursor "add to dictionary?" pop-up actions.
   ipcMain.on("vocab:add", (_event, term) => {
@@ -1204,6 +1252,7 @@ function setupIpc() {
   // The settings window's "speech engine" panel drives these. The benchmark is
   // the real decision-maker (a hardware guess is unreliable), so local is only
   // ever kept after it measurably beats the cloud — or the user opts in anyway.
+  let benchmarkInFlight = false;
   ipcMain.handle("engine:probe", () => {
     const probe = probeCapability();
     return {
@@ -1218,6 +1267,14 @@ function setupIpc() {
   });
 
   ipcMain.handle("engine:benchmark", async (event, payload) => {
+    // Single-flight: the Settings window's disabled-button guard dies with the
+    // window. A second concurrent run would stream into the same .part file
+    // and rename a corrupt model into place — which then passes the
+    // "already downloaded" size check forever.
+    if (benchmarkInFlight) {
+      return { ok: false, error: "A speed test is already running — give it a moment to finish." };
+    }
+    benchmarkInFlight = true;
     const probe = probeCapability();
     const modelName = (payload && payload.model) || recommendedAssets(probe).model;
     const variant = recommendedAssets(probe).variant; // cuda for NVIDIA, else cpu
@@ -1228,10 +1285,13 @@ function setupIpc() {
       if (process.platform !== "win32") {
         throw new Error("The on-device engine isn't available on this platform yet — use a cloud engine.");
       }
-      // 1) Engine binaries (skipped instantly if already present).
-      send("Getting the on-device engine ready…");
+      // 1) Engine binaries (skipped instantly if already present). The CUDA
+      // build is a 700 MB pull — say so up front instead of surprising a
+      // metered connection.
+      const zipMB = WINDOWS_BINARY_ZIPS[variant] ? WINDOWS_BINARY_ZIPS[variant].sizeMB : "?";
+      send(`Getting the on-device engine ready (${zipMB} MB download if not yet installed)…`);
       const bin = await ensureWindowsBinaries(variant, BIN_DIR, {
-        onProgress: (p) => send("Downloading the on-device engine…", p)
+        onProgress: (p) => send(`Downloading the on-device engine (${zipMB} MB)…`, p)
       });
       // 2) The speech model (only downloaded if missing).
       const sizeMB = MODELS[modelName] ? MODELS[modelName].sizeMB : "?";
@@ -1247,6 +1307,8 @@ function setupIpc() {
     } catch (err) {
       console.error("[main] engine benchmark failed:", err && err.message);
       return { ok: false, error: (err && err.message) || "The speed test couldn't run." };
+    } finally {
+      benchmarkInFlight = false;
     }
   });
 
@@ -1256,7 +1318,13 @@ function setupIpc() {
     /** @type {Record<string,string>} */
     const patch = { STT_PROVIDER: provider };
     if (provider === "whisper-local" && payload && payload.modelName) {
-      patch.WHISPER_MODEL = join(MODELS_DIR, payload.modelName);
+      const modelPath = join(MODELS_DIR, payload.modelName);
+      // Never write a config pointing at a model that isn't on disk — a failed
+      // download would otherwise brick every dictation until re-setup.
+      if (!existsSync(modelPath)) {
+        return { error: "That speech model isn't downloaded yet — run the speed test first." };
+      }
+      patch.WHISPER_MODEL = modelPath;
       if (process.platform === "win32") patch.WHISPER_BIN = join(BIN_DIR, "whisper-cli.exe");
     }
     try {
@@ -1354,6 +1422,9 @@ function rebuildTrayMenu() {
     const hasRecording = !!entry.recordingPath && existsSync(entry.recordingPath);
     /** @type {import("electron").MenuItemConstructorOptions[]} */
     const sub = [];
+    // The ⚠ on the parent row needs a legend — say what it means right where
+    // the user looks for the text.
+    if (!entry.pasted) sub.push({ label: "⚠ Wasn't pasted into any app", enabled: false });
     if (flat) sub.push({ label: "Copy text", click: () => clipboard.writeText(entry.text) });
     sub.push({
       label: hasRecording ? "Play recording" : "Recording unavailable",
@@ -1391,11 +1462,12 @@ function rebuildTrayMenu() {
       }
     },
     { type: "separator" },
-    {
+    // Engine-room jargon that opened a leftover dev page — dev runs only.
+    ...(VERBOSE ? [{
       label: serverPort ? `Relay: http://localhost:${serverPort}` : "Relay: not running",
       enabled: !!serverPort,
-      click: () => serverPort && shell.openExternal(`http://localhost:${serverPort}`)
-    },
+      click: () => { if (serverPort) shell.openExternal(`http://localhost:${serverPort}`); }
+    }] : []),
     {
       label: "Start at login",
       type: "checkbox",
@@ -1477,7 +1549,7 @@ function buildAppMenu() {
 let dictationBroughtUp = false;
 async function bringUpDictation(onReady) {
   if (!serverPort) return;
-  if (dictationBroughtUp) { onReady?.(); return; }
+  if (dictationBroughtUp) { onReady?.(!hotkeyFailed); return; }
   dictationBroughtUp = true;
   createPillWindow();
   createVocabWindow();
@@ -1485,8 +1557,8 @@ async function bringUpDictation(onReady) {
   setupPowerMonitor();
   if (!dictationWindow) return;
   dictationWindow.webContents.once("did-finish-load", async () => {
-    await setupHotkey();
-    onReady?.();
+    const hotkeyOk = await setupHotkey();
+    onReady?.(hotkeyOk);
   });
 }
 
@@ -1575,7 +1647,7 @@ app.whenReady().then(async () => {
   // "Recent dictations" menu. Loaded before the tray builds its first menu.
   await initHistory();
 
-  setSplashStatus("Starting the local relay…");
+  setSplashStatus("Getting things ready…");
   await bootRelayServer();
   buildAppMenu();
   createTray();
@@ -1591,17 +1663,31 @@ app.whenReady().then(async () => {
     // hangs, renderer crash), still tuck the splash away instead of leaving it
     // pinned on screen. The normal ready path below fires well before this.
     setTimeout(dismissSplashToTray, 9000);
-    await bringUpDictation(() => {
+    await bringUpDictation((hotkeyOk) => {
       // Fully live now: flip the splash to its "ready" look, let it land for a
-      // beat, then animate it down into the tray and disappear.
-      const holdKey = process.platform === "darwin" ? "right Option" : "right Alt";
+      // beat, then animate it down into the tray and disappear. If the hotkey
+      // failed to arm, say THAT instead of a false "Ready".
+      if (hotkeyOk === false) {
+        setSplashStatus("The dictation key couldn't start — quit GVoice and reopen it.", "error");
+        setTimeout(dismissSplashToTray, 4500);
+        return;
+      }
+      const holdKey = process.platform === "darwin" ? "right Option" : "Ctrl+Shift";
       setSplashStatus(`Ready — hold ${holdKey} to dictate.`, "ready");
       setTimeout(dismissSplashToTray, 650);
     });
   } else {
     // Relay couldn't start (usually a missing API key). Surface it on the
     // splash instead of failing silently, then tuck it away — the tray stays.
-    setSplashStatus(onboard || serverError || "Couldn't start. Check your settings.", onboard ? "loading" : "error");
+    // serverError is raw Node text (EADDRINUSE etc.) — keep that in the log,
+    // show plain words on screen.
+    if (serverError) dlog("boot-error", serverError);
+    setSplashStatus(
+      onboard || (serverError
+        ? "Couldn't start — another copy of GVoice may be running. Quit it and reopen."
+        : "Couldn't start. Check your settings."),
+      onboard ? "loading" : "error"
+    );
     setTimeout(dismissSplashToTray, onboard ? 1800 : 4500);
   }
 

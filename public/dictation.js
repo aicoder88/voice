@@ -50,6 +50,19 @@ const FAILURE_MS = Number(window.DICTATION_FAILURE_MS || 20000);
 const TAIL_MS = Number(window.DICTATION_TAIL_MS || 250);
 let draining = false;
 let drainTimer = null;
+// Partial-transcript fallback armed by finishUtterance. Tracked so a new press
+// can cancel the previous utterance's timer — a stale one firing mid-hold
+// would type the NEW utterance's first words early and break its finalize.
+let fallbackTimer = null;
+// startRecording awaits the socket + mic; a quick tap can deliver the stop
+// while it's still in flight, and a stop dropped there used to leave the mic
+// recording (and streaming) until the next press. Track the in-flight start
+// and the deferred stop so a tap commits normally.
+let startInFlight = false;
+let stopRequested = false;
+// When the hold started (key-down), for the dead-pipeline check: a long hold
+// that produced ~no bytes means no frames arrived at all.
+let holdStartedAt = 0;
 
 // Rolling pre-roll buffer of the most recent mic audio. The capture pipeline
 // runs continuously once warmed, so on key-press we can flush the last ~600ms
@@ -203,7 +216,10 @@ function handleRealtimeEvent(msg) {
 
   if (t === "error" || t === "local.error") {
     log("Error: " + JSON.stringify(msg));
-    reportFailure("The transcriber reported an error: " + (msg.error?.message || msg.message || "unknown error"));
+    // Action first; the technical detail rides along for the curious (and is
+    // always in the log).
+    const detail = msg.error?.message || msg.message || "";
+    reportFailure("Transcription failed — press and try again." + (detail ? " (" + detail + ")" : ""));
   }
 }
 
@@ -267,6 +283,19 @@ function finalizeAndSend(text) {
 // signal.
 async function initCapture() {
   if (captureReady) return;
+  try {
+    await buildCaptureGraph();
+  } catch (err) {
+    // Never leave a half-built graph behind: getUserMedia may have succeeded
+    // before a later step threw, and that stray live track would keep the
+    // mic-in-use indicator on AND get a second graph stacked on top by the
+    // next attempt (doubled, garbled audio).
+    teardownCapture(true);
+    throw err;
+  }
+}
+
+async function buildCaptureGraph() {
   audioContext = audioContext || new AudioContext();
   if (audioContext.state === "suspended") await audioContext.resume();
 
@@ -389,6 +418,10 @@ function teardownCapture(full = false) {
 function handleMicLost(reason) {
   log("Mic lost: " + reason);
   isRecording = false;
+  // Cancel a pending tail-drain commit: finishUtterance on a torn-down
+  // pipeline would double-report (failure pill over this mic warning).
+  clearTimeout(drainTimer);
+  draining = false;
   teardownCapture(true); // full rebuild — a partial one can keep a wedged context
   silentStreak = 0;
   clearFailureTimer();
@@ -430,8 +463,8 @@ async function rebuildCapture(reason) {
       if (audioContext && audioContext.state === "suspended") await audioContext.resume();
       log("Capture rebuilt after " + (reason || "wake"));
     } catch (error) {
-      // Leave it torn down; the next press's initCapture will try again.
-      captureReady = false;
+      // Leave NOTHING half-built; the next press's initCapture tries again.
+      teardownCapture(true);
       log("Proactive rebuild failed: " + (error && error.message));
     }
   })();
@@ -439,7 +472,10 @@ async function rebuildCapture(reason) {
 }
 
 async function startRecording(profile) {
-  if (isRecording) return;
+  if (isRecording || startInFlight) return;
+  startInFlight = true;
+  stopRequested = false;
+  holdStartedAt = Date.now();
   // A new press during the previous utterance's tail drain supersedes it: cancel
   // the pending commit so this fresh recording's frames aren't committed early.
   if (draining) { clearTimeout(drainTimer); draining = false; }
@@ -458,8 +494,10 @@ async function startRecording(profile) {
   if (isCloud && navigator.onLine === false) {
     setStatus("Offline");
     log("Offline pre-flight: navigator.onLine === false, provider=" + provider);
+    startInFlight = false;
+    // Action first — the pill label can truncate the tail of a long reason.
     window.dictationBridge.sendError(
-      "You're offline. Cloud dictation needs an internet connection — switch to local Whisper in Settings to dictate offline."
+      "Offline — switch to the local Whisper engine in Settings, or reconnect."
     );
     return;
   }
@@ -469,7 +507,8 @@ async function startRecording(profile) {
     await ensureSocket();
   } catch {
     setStatus("WS failed");
-    window.dictationBridge.sendError("Could not connect to relay");
+    startInFlight = false;
+    window.dictationBridge.sendError("Dictation couldn't start — quit GVoice and reopen it, then try again.");
     return;
   }
 
@@ -486,9 +525,18 @@ async function startRecording(profile) {
     // context (e.g. after sleep). Resume so frames flow again.
     if (audioContext.state === "suspended") await audioContext.resume();
   } catch (error) {
-    captureReady = false;
+    // A partial build must not linger: the old track would stay live (mic
+    // indicator on) and the next attempt would stack a second graph on top.
+    teardownCapture(true);
     setStatus("Mic blocked");
-    window.dictationBridge.sendError("Microphone not available: " + error.message);
+    startInFlight = false;
+    const errName = error && error.name;
+    const micMsg = errName === "NotAllowedError" || errName === "SecurityError"
+      ? "GVoice needs microphone access — allow it in System Settings → Privacy & Security → Microphone."
+      : errName === "NotFoundError"
+        ? "No microphone found — plug one in and try again."
+        : "Microphone not available: " + (error && error.message);
+    window.dictationBridge.sendError(micMsg);
     return;
   }
 
@@ -499,6 +547,10 @@ async function startRecording(profile) {
   gotTerminalEvent = false;
   failureHandled = false;
   clearFailureTimer();
+  // The previous utterance's partial-transcript fallback must not fire into
+  // this one.
+  clearTimeout(fallbackTimer);
+  fallbackTimer = null;
   recordedChunks = [];
   recordedBytes = 0;
   isRecording = true;
@@ -522,6 +574,13 @@ async function startRecording(profile) {
 
   setStatus("Listening");
   log("Mic started (preroll " + prerollBytes + "B)");
+  startInFlight = false;
+  // A quick tap released the key while we were still connecting — honor it
+  // now so the tap commits (preroll included) instead of recording forever.
+  if (stopRequested) {
+    stopRequested = false;
+    stopRecording();
+  }
 }
 
 function stopRecording() {
@@ -555,7 +614,10 @@ function finishUtterance() {
     minBytes: MIN_FAILURE_BYTES,
     silencePeak: SILENCE_PEAK,
     silentStreak,
-    streakLimit: SILENT_STREAK_LIMIT
+    streakLimit: SILENT_STREAK_LIMIT,
+    // Lets classifyHold tell a genuine tap (short hold, few bytes) from the
+    // no-frames-at-all wedge (long hold, still no bytes ⇒ dead pipeline).
+    holdMs: holdStartedAt ? Date.now() - holdStartedAt : 0
   });
   silentStreak = verdict.silentStreak;
   if (verdict.action === "silent") {
@@ -563,7 +625,7 @@ function finishUtterance() {
   }
   if (verdict.action === "dead") {
     log("Dead mic (peak=" + utterancePeak.toFixed(4) + ", bytes=" + recordedBytes + ") — rebuilding capture");
-    handleMicLost("No audio reached the app — the mic was restarted. Press and try again.");
+    handleMicLost("Mic restarted — press and try again.");
     return;
   }
 
@@ -582,7 +644,9 @@ function finishUtterance() {
 
   const FALLBACK_MS = Number(window.DICTATION_FALLBACK_MS || 1200);
   const startedAt = Date.now();
-  setTimeout(() => {
+  clearTimeout(fallbackTimer);
+  fallbackTimer = setTimeout(() => {
+    fallbackTimer = null;
     if (alreadyFinalized) return;
     if (lastFinalAt < startedAt && transcriptParts.length > 0) {
       finalizeAndSend(transcriptParts.join("").trim());
@@ -601,7 +665,16 @@ function finishUtterance() {
 }
 
 window.dictationBridge.onStart((profile) => startRecording(profile));
-window.dictationBridge.onStop(() => stopRecording());
+window.dictationBridge.onStop(() => {
+  // A tap can release before startRecording's awaits finish — defer the stop
+  // so the in-flight start commits it instead of dropping it (which left the
+  // mic recording until the next press).
+  if (startInFlight && !isRecording) {
+    stopRequested = true;
+    return;
+  }
+  stopRecording();
+});
 window.dictationBridge.onRebuildCapture((reason) => rebuildCapture(reason));
 
 function arrayBufferToBase64(buffer) {

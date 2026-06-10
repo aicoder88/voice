@@ -25,8 +25,6 @@ export class DictationSession {
     /** @type {boolean} */
     this.busy = false;
     /** @type {number | null} */
-    this.pressAt = null;
-    /** @type {number | null} */
     this.releaseAt = null;
     /** @type {ReturnType<typeof setTimeout> | null} */
     this._safetyTimer = null;
@@ -47,7 +45,9 @@ export class DictationSession {
     }
     this._clearSafetyTimer();
     this.busy = true;
-    this.pressAt = Date.now();
+    // Forget the previous session's release stamp, or finalize() on a session
+    // that errors before release would report timings from the LAST dictation.
+    this.releaseAt = null;
     return true;
   }
 

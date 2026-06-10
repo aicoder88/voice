@@ -31,7 +31,10 @@ export function startServer({ port = Number(process.env.PORT || 3000), model = p
     // user-data dir) so the pop-up can play them back. Serve them read-only,
     // guarding against path traversal by allowing only the bare filename.
     if (recordingsDir && url.pathname.startsWith("/recordings/")) {
-      const name = decodeURIComponent(url.pathname.slice("/recordings/".length));
+      // Malformed percent-encoding (%zz) throws — treat it as not-found
+      // instead of an unhandled rejection that kills a bare `node server.js`.
+      let name = "";
+      try { name = decodeURIComponent(url.pathname.slice("/recordings/".length)); } catch {}
       const target = resolve(recordingsDir, name);
       // Must be a .wav that resolves to a direct child of recordingsDir — this
       // contains any traversal (../, encoded separators, absolute paths).

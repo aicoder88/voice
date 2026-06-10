@@ -1,5 +1,7 @@
 # Refactor — multi-pass execution log
 
+**Status: completed (2026-06).** All passes landed; kept as a historical log.
+
 Durable plan + state for the modernization refactor. Source of truth between sessions.
 
 ## How to use this file
@@ -19,7 +21,7 @@ The recommendation heuristic is documented next to the Status table. Honor it un
 
 - Modernize without behavior change. Public APIs frozen.
 - Public surfaces preserved:
-  - `attachRealtimeRelay(server, options)` signature + option keys (see `README.md`).
+  - `attachRealtimeRelay(server, options)` signature + option keys (see the JSDoc in `realtime-relay.js` and `docs/RELAY_PROTOCOL.md`).
   - `<realtime-voice-agent>` custom element: name, attributes (`endpoint`, `agent`, `compact`, `instructions`, `autoconnect`), shadow-DOM contract.
   - `startServer({ port, model }) → Promise<{ server, port }>`.
   - `/realtime` WebSocket protocol per `docs/RELAY_PROTOCOL.md` (4 invariants).

@@ -132,9 +132,17 @@ export function isEditableFieldFocused() {
     if (!systemWide) return null;
     try {
       const focusedOut = [null];
-      // kAXErrorSuccess === 0. Anything else (incl. no focused element) ⇒ no
-      // editable target.
-      if (AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElement, focusedOut) !== 0) return false;
+      // kAXErrorSuccess === 0. Only the codes that genuinely mean "nothing
+      // focused" may return false — false downgrades a paste to a hard
+      // "Couldn't paste" error. Transient codes (kAXErrorCannotComplete -25204:
+      // target app busy or AX messaging timed out; kAXErrorAPIDisabled -25211)
+      // mean "couldn't tell" ⇒ null, which the caller never holds against the
+      // paste.
+      const axErr = AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElement, focusedOut);
+      if (axErr !== 0) {
+        const NO_FOCUS_CODES = new Set([-25212 /* NoValue */, -25202 /* InvalidUIElement */, -25205 /* NotImplemented */]);
+        return NO_FOCUS_CODES.has(axErr) ? false : null;
+      }
       const focused = focusedOut[0];
       if (!focused) return false;
       try {

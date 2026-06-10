@@ -77,7 +77,9 @@ export function attach(clientSocket, requestUrl, { apiKey, model, instructions }
 
   openaiSocket.on("error", (error) => {
     console.error("[relay] openai socket error:", error.message);
-    sendToClient(clientSocket, { type: "local.error", message: error.message });
+    // Provider prefix matches "Deepgram: " / "whisper-local: " so the user can
+    // tell which engine failed.
+    sendToClient(clientSocket, { type: "local.error", message: "OpenAI: " + error.message });
   });
 
   openaiSocket.on("close", (code, reason) => {

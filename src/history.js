@@ -4,7 +4,7 @@
 // Newest first. Reads happen once at boot; writes are serialized so rapid
 // dictations can't interleave and corrupt the file.
 import { app } from "electron";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile, writeFile, rename } from "node:fs/promises";
 import { join } from "node:path";
 
 const MAX_ENTRIES = 50;
@@ -63,7 +63,14 @@ export function recordTranscript(text, pasted, recordingPath = null) {
   entries.unshift({ ts: Date.now(), text: text || "", pasted, recordingPath: recordingPath || null });
   if (entries.length > MAX_ENTRIES) entries.length = MAX_ENTRIES;
   const snapshot = JSON.stringify(entries, null, 2);
+  // Atomic write (tmp + rename): a crash mid-write must not leave a truncated
+  // file — initHistory's catch would then silently start fresh, wiping the
+  // very history that exists so "a missed paste is never lost".
   writeChain = writeChain
-    .then(() => historyPath ? writeFile(historyPath, snapshot, "utf8") : undefined)
+    .then(async () => {
+      if (!historyPath) return;
+      await writeFile(historyPath + ".tmp", snapshot, "utf8");
+      await rename(historyPath + ".tmp", historyPath);
+    })
     .catch((err) => console.error("[history] write failed:", err && err.message));
 }

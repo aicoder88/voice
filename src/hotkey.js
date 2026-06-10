@@ -159,15 +159,16 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
   // Lazy require so Windows builds don't choke if uiohook-napi isn't present
   // (e.g. native rebuild skipped, prebuild missing). The project is ESM, so
   // we go through createRequire to keep this synchronous and preserve the
-  // startHotkey contract. Any failure here just disables hotkeys with a
-  // logged error — the rest of the app keeps running.
+  // startHotkey contract. A load failure THROWS: returning a stub here once
+  // made the app boot to a "Ready" splash with a dead hotkey — the caller
+  // must know so it can tell the user.
   /** @type {any} */
   let uiohook;
   try {
     uiohook = require("uiohook-napi");
   } catch (err) {
     console.error("[hotkey] uiohook-napi load failed:", err && /** @type {any} */ (err).message);
-    return { stop() {} };
+    throw new Error("uiohook-napi failed to load: " + (err && /** @type {any} */ (err).message));
   }
   const { uIOhook, UiohookKey } = uiohook;
 
@@ -234,6 +235,14 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
     if (event) {
       if (ctrlLDown && event.ctrlKey === false) ctrlLDown = false;
       if (cmdLDown && event.metaKey === false) cmdLDown = false;
+      // Also free the shared hold tracker. Clearing the flags alone isn't
+      // enough: a swallowed keyup mid-dictation leaves the hold latched, so
+      // onRelease never fires and the mic keeps recording until the same
+      // trigger is pressed AND released again. release() of a source that
+      // isn't held is a no-op, so normal typing is unaffected. (The mouse
+      // back button has no modifier-mask equivalent to heal from.)
+      if (event.altKey === false) releaseSource("alt");
+      if (event.ctrlKey === false || event.metaKey === false) releaseSource("ctrlCmd");
     }
     // Any hold-to-talk key counts as "another key" if the right-Ctrl tap
     // window is open (tap.other() no-ops when it isn't), so a chord involving
@@ -308,6 +317,14 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
     uIOhook.start();
   } catch (err) {
     console.error("[hotkey] uIOhook.start failed:", err && /** @type {any} */ (err).message);
+    // Detach so a caller retry can't double-register, then surface the
+    // failure — a silent catch here leaves the app looking alive with a
+    // dead hotkey.
+    try { uIOhook.off("keydown", handleDown); } catch {}
+    try { uIOhook.off("keyup", handleUp); } catch {}
+    try { uIOhook.off("mousedown", handleMouseDown); } catch {}
+    try { uIOhook.off("mouseup", handleMouseUp); } catch {}
+    throw new Error("uIOhook.start failed: " + (err && /** @type {any} */ (err).message));
   }
 
   return {

@@ -281,7 +281,7 @@ export function stopWhisperServer() {
   setTimeout(() => { if (isAlive(pid)) { try { process.kill(pid, "SIGKILL"); } catch {} } }, 1500).unref?.();
 }
 
-export function ensureWhisperServer(bin) {
+export function ensureWhisperServer(bin, modelPath) {
   if (whisperServerReady) return whisperServerReady;
 
   // Replace the trailing "-cli" (with optional .exe suffix on Windows) with
@@ -289,7 +289,10 @@ export function ensureWhisperServer(bin) {
   // spawning whisper-cli.exe with server-style flags, which printed help and
   // exited.
   const serverBin = bin ? bin.replace(/-cli(\.exe)?$/i, "-server$1") : "whisper-server";
-  const model = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin";
+  // Same resolution order as the CLI fallback gets via attach(), so the server
+  // and CLI can never run different models. The last-resort default is
+  // resolved against this file, not cwd (which varies by launch method).
+  const model = modelPath || process.env.WHISPER_MODEL || join(__dirname, "..", "..", "models", "ggml-small.en-q5_1.bin");
 
   whisperServerReady = (async () => {
     // Clean up a server orphaned by a previous crash/force-quit, then take a
@@ -333,12 +336,24 @@ export function ensureWhisperServer(bin) {
         console.error("[whisper-server]", s.trim());
       }
     });
+    const thisProc = whisperServerProc;
     whisperServerProc.on("exit", (code) => {
       console.error("[whisper-server] exited with code " + code);
-      whisperServerProc = null;
-      // Our server is gone — drop the stale-PID marker so a future launch never
-      // mistakes a recycled PID for it.
-      try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {}
+      // Only reset shared state if WE are still the current server — a late
+      // exit from an already-replaced (or already-stopped) child must not
+      // clobber its successor's state.
+      if (whisperServerProc === thisProc) {
+        whisperServerProc = null;
+        // A crash must not leave the cached ready-promise pointing at a dead
+        // port: ensureWhisperServer would return it forever and every later
+        // dictation would limp through the slow CLI fallback until an app
+        // restart. Reset so the next dictation respawns the server.
+        whisperServerReady = null;
+        delete process.env.WHISPER_SERVER_URL;
+        // Our server is gone — drop the stale-PID marker so a future launch
+        // never mistakes a recycled PID for it.
+        try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {}
+      }
     });
 
     if (!exitHandlerInstalled) {
@@ -353,18 +368,26 @@ export function ensureWhisperServer(bin) {
       });
     }
 
-    process.env.WHISPER_SERVER_URL = `${baseUrl}/inference`;
-
     await waitForServer(baseUrl, 10000, () => spawnError || (whisperServerProc === null ? new Error("whisper-server died before ready") : null));
+    // Publish the URL only once the server actually answers: a commit landing
+    // during the boot window would otherwise POST at a dead port, burn the
+    // retry, and drop to the slow CLI even though the server was seconds away.
+    process.env.WHISPER_SERVER_URL = `${baseUrl}/inference`;
     console.error("[whisper-server] ready at " + process.env.WHISPER_SERVER_URL);
   })();
 
-  whisperServerReady.catch(() => {
-    // Reset so a later attach() can retry instead of inheriting the failure.
-    whisperServerReady = null;
+  const thisReady = whisperServerReady;
+  thisReady.catch(() => {
+    // Reset so a later attach() can retry instead of inheriting the failure,
+    // and make sure no half-published URL points at a server that never came
+    // up. Guarded: a slow failure must not clobber a successor's boot.
+    if (whisperServerReady === thisReady) {
+      whisperServerReady = null;
+      delete process.env.WHISPER_SERVER_URL;
+    }
   });
 
-  return whisperServerReady;
+  return thisReady;
 }
 
 /**
@@ -474,7 +497,7 @@ export async function attach(clientSocket, { bin, model }) {
   // Frames that arrive during this await are already being buffered by the
   // listener above; commit only fires on key-release, long after this resolves.
   try {
-    await ensureWhisperServer(bin);
+    await ensureWhisperServer(bin, model);
   } catch (err) {
     console.error("[relay] whisper-server boot failed, will use CLI fallback:", err.message);
   }
@@ -532,10 +555,10 @@ async function transcribePcm(pcmBuffer, sampleRate, bin, model, prompt, language
  */
 async function runWhisperServer(url, wavBuffer, prompt, language = "auto") {
   const form = new FormData();
-  // Node Buffer is structurally a BlobPart, but TS's lib narrows the buffer's
-  // underlying type to ArrayBuffer (rejecting SharedArrayBuffer-backed views).
-  // Cast through to silence the false positive — Buffer is always non-shared.
-  form.append("file", new Blob([/** @type {ArrayBuffer} */ (wavBuffer.buffer)], { type: "audio/wav" }), "audio.wav");
+  // The Buffer itself (a Uint8Array view) — never its underlying ArrayBuffer,
+  // which ignores byteOffset/byteLength and could ship pool garbage around
+  // the WAV if the allocation ever lands in Buffer's shared pool.
+  form.append("file", new Blob([wavBuffer], { type: "audio/wav" }), "audio.wav");
   // verbose_json carries per-segment avg_logprob, which we average into a single
   // confidence so the hr/en picker can choose the more confident transcript.
   form.append("response_format", "verbose_json");
@@ -549,7 +572,11 @@ async function runWhisperServer(url, wavBuffer, prompt, language = "auto") {
   // slower CLI path. A clean 4xx is not retried — it would just fail again.
   const json = await withRetry(
     async () => {
-      const res = await fetch(url, { method: "POST", body: form });
+      // Cap the inference call: a wedged server (GPU hang) would otherwise pin
+      // the dictation until the renderer's 20s watchdog. A TimeoutError is NOT
+      // retried (see retry.js isRetryableError), so the caller falls to the
+      // CLI path after at most one 15s wait.
+      const res = await fetch(url, { method: "POST", body: form, signal: AbortSignal.timeout(15000) });
       if (!res.ok) {
         const body = await res.text().catch(() => "");
         throw httpError(res.status, body.slice(0, 200));

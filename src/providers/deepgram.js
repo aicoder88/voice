@@ -85,6 +85,13 @@ export function attach(clientSocket, { apiKey, model, language }) {
       console.error("[relay] deepgram connected model=" + model + " lang=" + legLang);
       sendToClient(clientSocket, { type: "local.status", status: "connected", provider: "deepgram", model });
       while (leg.queuedBinaries.length > 0) dgSocket.send(leg.queuedBinaries.shift());
+      // A short tap can commit while this leg was still connecting — deliver
+      // the Finalize it missed, right after the queued audio, so its flush
+      // completes the utterance instead of the 3s safety timeout (which could
+      // truncate the transcript).
+      if (finalizeSent && !leg.flushed) {
+        try { dgSocket.send(JSON.stringify({ type: "Finalize" })); } catch {}
+      }
     });
 
     dgSocket.on("message", (raw) => {
@@ -145,7 +152,12 @@ export function attach(clientSocket, { apiKey, model, language }) {
     dgSocket.on("close", (code, reason) => {
       console.error("[relay] deepgram closed lang=" + legLang + " code=" + code + " reason=" + reason.toString());
       leg.flushed = true;
-      if (legs.every((l) => l.flushed)) emitCompleted("socket_close");
+      // Same finalizeSent guard as the Results and error paths: legs dropping
+      // mid-hold (network blip) must NOT complete the utterance — a premature
+      // `completed` would paste a partial transcript while the user is still
+      // speaking. Pre-commit double-close falls through to clientSocket.close()
+      // below, which the renderer handles by saving the audio for retry.
+      if (finalizeSent && legs.every((l) => l.flushed)) emitCompleted("socket_close");
       if (legs.every((l) => l.dgSocket.readyState === WebSocket.CLOSED || l.dgSocket.readyState === WebSocket.CLOSING)) {
         sendToClient(clientSocket, { type: "local.status", status: "closed", code });
         clientSocket.close();
@@ -218,10 +230,16 @@ export function attach(clientSocket, { apiKey, model, language }) {
       for (const leg of legs) {
         if (leg.dgSocket.readyState === WebSocket.OPEN) {
           leg.dgSocket.send(JSON.stringify({ type: "Finalize" }));
+        } else if (leg.dgSocket.readyState === WebSocket.CONNECTING) {
+          // Still handshaking — its queued audio flushes on 'open', which also
+          // sends the Finalize this commit owes it (see the open handler).
         } else {
-          leg.flushed = true; // never connected — don't wait on it
+          leg.flushed = true; // closing/closed — don't wait on it
         }
       }
+      // Every leg already dead at commit time: complete now with whatever was
+      // heard instead of making the user wait out the 3s safety timeout.
+      if (legs.every((l) => l.flushed)) emitCompleted("commit_no_live_legs");
       // Safety net only — the from_finalize Results frames above are the
       // normal completion path. Long enough that it can't beat a healthy flush.
       // If THIS is what completes the utterance, the flush never came back —

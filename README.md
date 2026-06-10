@@ -12,7 +12,7 @@ cp .env.example .env   # then add your API key(s)
 pnpm start
 ```
 
-The app lives in the menu bar (macOS) or system tray (Windows). Hold **right Option** (macOS) or **right Alt** (Windows), speak, and release. Tap **right Ctrl** to flip the language. Full setup — including the local, no-API-cost Whisper option — is in [SETUP.md](SETUP.md).
+The app lives in the menu bar (macOS) or system tray (Windows). Hold **right Option** (macOS) or **Ctrl+Shift** (Windows, either side), speak, and release. On macOS, holding **left Ctrl+Cmd** or the **mouse back button** works too. Tap **right Ctrl** to flip the language. Full setup — including the local, no-API-cost Whisper option — is in [SETUP.md](SETUP.md).
 
 First launch with no API key set? GVoice opens its **Settings** window so you can pick an engine and paste a key — no hand-editing files. You can reopen it any time from the tray (**Settings…**).
 
@@ -21,7 +21,7 @@ First launch with no API key set? GVoice opens its **Settings** window so you ca
 Pick one with `STT_PROVIDER` in `.env`:
 
 - **`deepgram`** — fast cloud transcription (needs `DEEPGRAM_API_KEY`).
-- **`whisper-local`** — runs entirely on your machine, no per-clip cost (needs whisper.cpp binaries + a model; see SETUP.md).
+- **`whisper-local`** — runs entirely on your machine, no per-clip cost (needs whisper.cpp binaries + a model; see SETUP.md). On Windows, the Settings window can set this up for you: it downloads the engine and a model, runs a speed test on your actual hardware, and only suggests keeping local if it's fast enough.
 - **`openai`** — OpenAI's realtime transcription (needs `OPENAI_API_KEY`).
 
 ## Custom dictionary
@@ -36,7 +36,7 @@ Two ways to fill it:
 ## How it works
 
 ```
-Right Option/Alt held
+Hotkey held (right Option / Ctrl+Shift)
         │
         ▼
    main.js (Electron)  ──IPC──▶  dictation window (hidden)
@@ -46,7 +46,7 @@ Right Option/Alt held
         │                               │
         │                       transcript comes back
         ▼                               │
-Right Option/Alt released ──────────────┘
+Hotkey released ────────────────────────┘
         │
         ▼
    cleanup pass (optional LLM polish)  ──▶  paste into the focused app
@@ -73,6 +73,10 @@ Everything (including the knobs not in the window — models, ports, the diction
 
 **Recordings & privacy.** GVoice keeps recent dictation audio on disk so a missed paste stays recoverable. These clips are unencrypted. They're capped at the last 50 *and* auto-deleted after `RECORDING_RETENTION_DAYS` (default 7). Turn saving off entirely, change the window, or wipe them now from Settings (or the tray's **Clear recordings**).
 
+**Dictation history.** The tray's **Recent dictations** menu keeps your last 50 transcripts (they survive restarts), so a paste that missed its target can be copied again — and each entry's audio clip can be played back while recordings are enabled.
+
 ## Troubleshooting & logs
 
 Per-event tracing (key presses, paste timing, cleanup) is written to `debug.log` in the app's data folder — on macOS that's `~/Library/Application Support/GVoice/debug.log` (rotated at ~1 MB). Set `GVOICE_DEBUG=1` to also echo those traces to the console while developing.
+
+**Mic goes quiet after sleep?** GVoice watches for it. If the system wakes from sleep (or the audio device changes) and the mic starts delivering pure silence, the capture pipeline is rebuilt automatically on the next press — no restart needed.

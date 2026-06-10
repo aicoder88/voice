@@ -61,8 +61,22 @@ export function applyEnv(text, patch) {
   for (const [key, rawValue] of Object.entries(patch)) {
     const value = String(rawValue ?? "");
     if (/[\r\n]/.test(value)) throw new Error(`Setting ${key} cannot contain a newline`);
+    // Quoting rules are dictated by how dotenv READS the value back:
+    //  - double quotes expand \n and \r, so a Windows path like "C:\new models"
+    //    would come back with a real newline in it after the next restart
+    //    (JSON.stringify escaping made this worse — dotenv never unescapes);
+    //  - single quotes are read literally, so they're safe for backslashes.
     const needsQuote = /\s|#/.test(value);
-    const rendered = `${key}=${needsQuote ? JSON.stringify(value) : value}`;
+    let rendered;
+    if (!needsQuote) {
+      rendered = `${key}=${value}`;
+    } else if (!value.includes("'")) {
+      rendered = `${key}='${value}'`;
+    } else if (!value.includes('"') && !value.includes("\\")) {
+      rendered = `${key}="${value}"`;
+    } else {
+      throw new Error(`Setting ${key} mixes quotes/backslashes with spaces and can't be stored safely`);
+    }
     const existing = index.get(key);
     if (existing) {
       lines[existing.lineIndex] = rendered;

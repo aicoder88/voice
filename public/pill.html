@@ -53,6 +53,17 @@
         max-width: 380px;
       }
       body.has-actions .label { max-width: 210px; }
+      /* Result reasons can be full sentences; let them wrap to two lines
+         instead of ellipsizing away the instruction at the end. */
+      body[data-state="success"] .label,
+      body[data-state="error"] .label {
+        white-space: normal;
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        font-size: 13px;
+        line-height: 1.25;
+      }
 
       /* --- Per-state dot colour + animation ------------------------------- */
       body[data-state="listening"]    .dot { background: #ff5a5a; animation: pulse 1s ease-in-out infinite; }
@@ -156,25 +167,41 @@
         currentHideMs = (data && typeof data.holdMs === "number" ? data.holdMs : HIDE_BY_STATE[state]) ?? 8000;
         clearHide();
         if (isResult) armHide(currentHideMs);
+        // Fresh state = fresh hover tracking (the window likely moved).
+        overPill = false;
       }
 
       copyBtn.addEventListener("click", () => {
         window.pillBridge.copy();
         copyBtn.textContent = "Copied ✓";
-        // Hold the pill a touch longer so the confirmation registers.
+        // Hold the pill a touch longer so the confirmation registers — and
+        // make that the new linger, or the mouseleave re-arm below would put
+        // the full 30s back after the user already got what they came for.
+        currentHideMs = 1400;
         armHide(1400);
       });
       openBtn.addEventListener("click", () => {
         window.pillBridge.openRecording();
+        currentHideMs = 1400;
         armHide(1400);
       });
 
-      // Keep the pill alive while the user is reaching for a button; on leave,
-      // re-arm with whatever lingering time this result was given.
-      document.body.addEventListener("mouseenter", clearHide);
-      document.body.addEventListener("mouseleave", () => {
+      // The window is click-through with forwarded mouse moves (see main.js);
+      // track whether the pointer is over the VISIBLE pill and flip real
+      // interactivity on only then — the transparent margins never eat clicks.
+      // The same boundary drives the hover-pause: linger while the user is
+      // reaching for a button, re-arm on leave.
+      const pillEl = document.querySelector(".pill");
+      let overPill = false;
+      document.addEventListener("mousemove", (e) => {
+        const over = pillEl.contains(e.target);
+        if (over === overPill) return;
+        overPill = over;
         const s = document.body.getAttribute("data-state");
-        if (s === "success" || s === "error") armHide(currentHideMs);
+        const isResult = s === "success" || s === "error";
+        if (isResult) window.pillBridge.setInteractive(over);
+        if (over) clearHide();
+        else if (isResult) armHide(currentHideMs);
       });
 
       window.pillBridge.onState(applyState);

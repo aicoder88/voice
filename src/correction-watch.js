@@ -92,8 +92,14 @@ export function createCorrectionWatcher({ onWord }) {
   };
 
   // A mouse click usually means the caret jumped (e.g. the user selected a word
-  // to replace it), so the half-typed token before it is meaningless.
-  const onMousedown = () => { current = ""; };
+  // to replace it), so the half-typed token before it is meaningless. Same
+  // lapse self-cleanup as onKeydown — mouse-only activity after the window
+  // expires must also detach the listeners, or the privacy promise ("attached
+  // only while armed") is keyboard-only.
+  const onMousedown = () => {
+    current = "";
+    if (!isArmed()) detach();
+  };
 
   // Listeners are attached only while armed, so when GVoice isn't actively
   // watching for a correction the OS keystroke callback isn't even firing —

@@ -105,12 +105,20 @@ export async function typeText(text) {
 
   if (USE_CLIPBOARD) {
     const previousClipboard = clipboard.readText();
+    // A copied image (screenshot) reads back as empty TEXT — capture it too,
+    // or every dictation would destroy it (restore would write "" over it).
+    // Files/rich clipboard content can't be fully round-tripped from Electron;
+    // text + image covers the common cases.
+    const previousImage = previousClipboard ? null : clipboard.readImage();
     clipboard.writeText(textToPaste);
     try {
       await pasteShortcut();
     } finally {
       setTimeout(() => {
-        try { clipboard.writeText(previousClipboard); } catch {}
+        try {
+          if (previousImage && !previousImage.isEmpty()) clipboard.writeImage(previousImage);
+          else clipboard.writeText(previousClipboard);
+        } catch {}
       }, 250);
     }
     return;

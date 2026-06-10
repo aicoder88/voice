@@ -67,7 +67,12 @@ export function attachRealtimeRelay(server, options = {}) {
 
   server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url || "/", `http://${request.headers.host}`);
-    if (url.pathname !== path) return;
+    if (url.pathname !== path) {
+      // Fail fast instead of leaving the TCP socket half-open until the
+      // client's own timeout.
+      socket.destroy();
+      return;
+    }
     browserSockets.handleUpgrade(request, socket, head, (clientSocket) => {
       browserSockets.emit("connection", clientSocket, request);
     });

@@ -9,7 +9,8 @@ The protocol is deliberately shaped to look like a subset of the OpenAI Realtime
 - URL: `ws://<host>/realtime` (path configurable via `attachRealtimeRelay({ path })`)
 - Query parameters:
   - `provider` — `openai` | `deepgram` | `whisper-local` (alias: `local`). Default: `STT_PROVIDER` env or `openai`.
-  - `model` — only honored by the OpenAI transport. Two values switch the relay into transcription-only mode: `gpt-realtime-whisper`, `gpt-realtime-translate`. Any other value is passed through as the session model.
+  - `model` — honored by the OpenAI and Deepgram transports. OpenAI: two values switch the relay into transcription-only mode (`gpt-realtime-whisper`, `gpt-realtime-translate`); any other value is passed through as the session model. Deepgram: overrides `DEEPGRAM_MODEL`.
+  - `language` — Deepgram only. A BCP-47 code (`hr`, `en`, …) pins one language; `auto` (the default, also via `WHISPER_LANGUAGE` env) runs parallel per-language legs — see below.
 
 ## Client → relay
 
@@ -37,8 +38,8 @@ The relay emits two families of frames: **status frames** synthesized by the rel
 
 | Frame                                                                                                 | Emitted by                          |
 | ----------------------------------------------------------------------------------------------------- | ----------------------------------- |
-| `{ type: "conversation.item.input_audio_transcription.delta", delta }`                                | Deepgram (per is_final segment). OpenAI passthrough. |
-| `{ type: "conversation.item.input_audio_transcription.completed", transcript }`                       | Every provider — exactly once per commit. |
+| `{ type: "conversation.item.input_audio_transcription.delta", delta }`                                | Deepgram (per is_final segment, single-leg mode only). OpenAI passthrough. |
+| `{ type: "conversation.item.input_audio_transcription.completed", transcript }`                       | Every provider — exactly once per commit. Deepgram also includes a `language` field (the winning leg). |
 
 The OpenAI transport also passes through all native Realtime API frames it receives (`response.output_text.delta`, `response.done`, `error`, etc.). The browser tolerates any of them.
 
@@ -55,16 +56,19 @@ The OpenAI transport also passes through all native Realtime API frames it recei
 
 ### `deepgram`
 
-- Opens `wss://api.deepgram.com/v1/listen` with `Authorization: Token $DEEPGRAM_API_KEY`, model from `DEEPGRAM_MODEL` (default `nova-3`), `language=multi`, `encoding=linear16`, `sample_rate=24000`, `interim_results=true`, `endpointing=false`.
-- `input_audio_buffer.append` → base64-decoded and sent as a binary frame.
-- `input_audio_buffer.commit` → sends `{ type: "Finalize" }` to Deepgram; emits the synthesized `completed` frame after the final `Results` arrives (or after a 1.5 s safety timeout).
-- Final `Results` segments are streamed as `...transcription.delta` frames; the accumulated text becomes the `transcript` field of the `...completed` frame.
+- Opens one or more "legs" — one streaming connection per candidate language — to `wss://api.deepgram.com/v1/listen` with `Authorization: Token $DEEPGRAM_API_KEY`, model from `DEEPGRAM_MODEL` (default `nova-3`, overridable via `?model=`), `encoding=linear16`, `sample_rate=24000`, `punctuate=true`, `smart_format=true`, `interim_results=true`, `endpointing=false`. Custom-dictionary terms are appended as `keyterm` params (nova-3) or `keywords` (older models).
+- **Language legs.** A pinned `?language=` opens a single leg in that language. Language `auto` (the default) runs one leg per candidate (`hr` + `en`) **in parallel on the same audio** — Deepgram streaming has no language detection covering Croatian — and the winner is the leg with the highest confidence-weighted word score that actually heard words. Latency is unchanged; per-clip cost doubles.
+- `input_audio_buffer.append` → base64-decoded and sent as a binary frame to every leg.
+- `input_audio_buffer.commit` → sends `{ type: "Finalize" }` to every leg; the synthesized `completed` frame is emitted once every leg has flushed (a `Results` frame with `from_finalize`/`speech_final`), or after a 3 s safety timeout if a flush never comes back.
+- Final `Results` segments are streamed as `...transcription.delta` frames **only in single-leg mode** (with parallel legs they would interleave two languages). The winning leg's accumulated text becomes the `transcript` field of the `...completed` frame, alongside a `language` field naming the winner.
 
 ### `whisper-local`
 
 - Accumulates `input_audio_buffer.append` PCM in memory until `input_audio_buffer.commit`.
 - Wraps the PCM in a WAV header and either POSTs it to `WHISPER_SERVER_URL` (if set) or invokes the `whisper-cli` binary on a tempfile.
 - Buffers smaller than 4800 bytes (0.1 s) return an empty transcript without invoking whisper.
+- **Silence gate.** If the loudest sample in the buffer never crosses `WHISPER_SILENCE_PEAK` (default `500` on the int16 scale, ~1.5% of full scale), the buffer is treated as silence and an empty transcript is returned without invoking whisper — Whisper hallucinates plausible text on near-silent audio. Set `WHISPER_SILENCE_PEAK=0` to disable.
+- **Hallucination sanitizer.** Whisper's output is scrubbed before it reaches the client: bracketed/parenthesized sound tags (`[BLANK_AUDIO]`, `(music)`, `*laughs*`) are stripped, and if what remains is empty or one of Whisper's stock silence hallucinations ("Thank you.", "Thanks for watching", and their multilingual variants), the transcript comes back empty. Whole-string match only — a real sentence that merely starts with one of these phrases is untouched.
 - Emits exactly one `...completed` frame per commit.
 
 ## Invariants the refactor preserves

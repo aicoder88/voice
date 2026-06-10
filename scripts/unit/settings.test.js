@@ -50,14 +50,30 @@ test("applyEnv: appends a missing key", () => {
   assert.ok(after.includes("B=2"));
 });
 
-test("applyEnv: quotes values with spaces or #", () => {
+test("applyEnv: quotes values with spaces or # (single quotes — dotenv reads them literally)", () => {
   const after = applyEnv("", { OPENAI_API_KEY: "a b", NOTE: "x#y" });
-  assert.ok(after.includes('OPENAI_API_KEY="a b"'));
-  assert.ok(after.includes('NOTE="x#y"'));
+  assert.ok(after.includes("OPENAI_API_KEY='a b'"));
+  assert.ok(after.includes("NOTE='x#y'"));
 });
 
-test("applyEnv: rejects newlines in a value", () => {
+test("applyEnv: a Windows path with spaces round-trips without escape mangling", () => {
+  // Double quotes would make dotenv expand the \n in "\new" into a newline;
+  // JSON.stringify used to double the backslashes instead. Single quotes are
+  // read literally, so the path survives a restart byte-for-byte.
+  const path = "C:\\Users\\Mark Dev\\new models\\ggml.bin";
+  const after = applyEnv("", { WHISPER_MODEL: path });
+  assert.ok(after.includes(`WHISPER_MODEL='${path}'`));
+  assert.equal(parseEnv(after).index.get("WHISPER_MODEL").value, path);
+});
+
+test("applyEnv: a spaced value containing a single quote falls back to double quotes", () => {
+  const after = applyEnv("", { NOTE: "it's fine" });
+  assert.ok(after.includes('NOTE="it\'s fine"'));
+});
+
+test("applyEnv: rejects newlines and unstorable quote/backslash mixes", () => {
   assert.throws(() => applyEnv("", { X: "a\nb" }), /newline/);
+  assert.throws(() => applyEnv("", { X: "a 'b' \\c" }), /can't be stored/);
 });
 
 test("applyEnv: does not grow trailing blank lines on repeated appends", () => {

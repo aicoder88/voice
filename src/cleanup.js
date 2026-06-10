@@ -250,6 +250,10 @@ function buildRequest(provider, apiKey, model, systemPrompt, userText) {
  */
 function parseResponse(provider, data) {
   if (provider.kind === "anthropic") {
+    // A response cut off at max_tokens is a TRUNCATED transcript — returning
+    // it as a success would silently drop the tail of what the user said.
+    // Empty string makes polishTranscript fall back to the full raw text.
+    if (data?.stop_reason === "max_tokens") return "";
     const parts = Array.isArray(data?.content) ? data.content : [];
     return parts.map((p) => (p && p.type === "text" ? p.text : "")).join("").trim();
   }

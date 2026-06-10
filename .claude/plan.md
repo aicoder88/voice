@@ -1,54 +1,126 @@
-# GVoice polish pass — 2026-06-10
+# GVoice full-review fix pass — 2026-06-10 (pt.2)
 
-Solo review (the 8-agent workflow hit the session limit; reviewed inline).
-Baseline: 97/97 unit, 4/5 parity (1 clean network skip). Impact-ordered.
+Source: 63-agent review (41 confirmed findings, 4 refuted, 36 lows).
+Full results JSON: /private/tmp/claude-501/-Users-macmini-dev-voice/45579cbf-db29-42e4-bc8b-12c7ceed7f02/tasks/wvcj36kgr.output
+(NOTE: /tmp may be wiped on reboot — the confirmed-findings details for the
+REMAINING items are restated under "Pending" below, self-contained.)
 
-## 1. Fix the uncommitted transcribeHrEn race (auto-language correctness)  ☑ done
-File: src/providers/whisper-local.js (uncommitted diff in working tree)
-- BUG in the WIP change: "first clean leg wins" defeats the function's purpose.
-  whisper-server serializes inference (one model context), and the EN leg is
-  POSTed first → EN nearly always finishes first. A forced-EN decode of
-  Croatian speech is garbled-but-real-looking text that PASSES the sanitizer,
-  so in auto mode Croatian would get typed as English garble almost every time.
-  The old confidence comparison was the only thing picking the right language.
-- Also: one leg erroring rejects the whole promise even when the other leg
-  has a good result (both old and new code) → falls back to slow CLI re-run.
-- Fix: Promise.allSettled both legs; pick via a NEW exported pure function
-  pickTranscript(en, hr) (sanitizer-survivor first, then confidence; a failed
-  leg loses to a successful one; both failed → throw so CLI fallback runs).
-- Unit tests for pickTranscript in scripts/unit (no server needed).
+Status: ☑ done (committed) / ☐ pending / ✗ deferred
 
-## 2. Bind the local relay to loopback only (privacy)  ☑ done
-File: server.js
-- BUG: server.listen(port) / listen(0) bind 0.0.0.0 — anyone on the same
-  Wi-Fi can reach the static server, /recordings/<name>.wav voice clips, and
-  the WS relay that spends the API keys. whisper-server already binds
-  127.0.0.1; the relay should too.
-- Fix: listen(port, "127.0.0.1") in both call sites.
+## DONE — committed, 105/105 unit + 4/5 parity green
+- ☑ main.js+hotkey.js: hotkey startup failure now surfaces (splash error,
+  tray warning tooltip, notification); hotkey.js throws instead of returning
+  a dead stub. [high]
+- ☑ dictation.js: quick-tap race — stop during async startRecording is now
+  deferred and committed instead of dropped (mic no longer records forever). [high]
+- ☑ dictation.js: 1200ms partial-transcript fallback timer now tracked +
+  cleared per utterance. [high→med]
+- ☑ whisper-local.js: server crash now respawns on next dictation (exit
+  handler resets whisperServerReady + clears WHISPER_SERVER_URL, guarded
+  against late exits from replaced children). [high]
+- ☑ whisper-local.js: WHISPER_SERVER_URL published only after the server
+  answers; cleared on boot failure; inference POST capped at 15s
+  (TimeoutError is not retried → falls to CLI); Blob([wavBuffer]) instead of
+  .buffer; ensureWhisperServer takes the model param (server/CLI can't
+  diverge). [med+lows]
+- ☑ deepgram.js: close handler gated on finalizeSent (no more premature
+  completed mid-hold → partial paste); CONNECTING legs get their Finalize on
+  open; commit with no live legs completes immediately. [high+med]
+- ☑ mic-health.js+dictation.js: no-frames wedge (long hold, ~0 bytes) now
+  classified dead → rebuild; holdMs passed from renderer. [med]
+- ☑ dictation.js: initCapture cleans up after itself on throw; all failure
+  paths teardownCapture(true) (no leaked live mic / double graph). [med]
+- ☑ dictation.js: handleMicLost cancels the pending tail-drain commit. [low]
+- ☑ main.js: transcribing-pill backstop 25s (outlives renderer 20s watchdog). [med]
+- ☑ main.js: DictationSession safetyTimeoutMs 25s (busy guard real now);
+  dictation-session.js drops dead pressAt, resets releaseAt per session. [med+low]
+- ☑ foreground.js: transient AX errors (CannotComplete/APIDisabled) return
+  null, not false → no more false "Couldn't paste". [med]
+- ☑ typing.js: clipboard image captured + restored (screenshot no longer
+  destroyed by dictating). [med]
+- ☑ settings.js: env quoting rewritten (single quotes, dotenv-literal);
+  Windows path with spaces round-trips; tests updated + 3 new. [low]
+- ☑ history.js: atomic write (tmp+rename). [low]
+- ☑ cleanup.js: anthropic max_tokens truncation → falls back to raw. [low]
+- ☑ correction-watch.js: mousedown also detaches after lapse. [low]
+- ☑ server.js: bad %-encoding in /recordings/ → 404, not crash. [low]
+- ☑ realtime-relay.js: wrong-path upgrade destroys the socket. [low]
+- ☑ openai.js: "OpenAI: " error prefix. [low]
+- ☑ hotkey.js: self-heal now releases the hold tracker (swallowed keyup
+  can't leave the mic recording). [low]
+- ☑ main.js engine handlers: benchmark single-flight guard; engine:apply
+  refuses a model path not on disk (returns { error }); CUDA 700 MB
+  disclosed in progress text. [high+med]
+- ☑ UX copy: Windows hotkey is "Ctrl+Shift" in tray tooltip/splash/balloon;
+  pill reasons action-first + conditioned "recording saved"; pill wraps to
+  2 lines on results; Copy/Open re-arm 1.4s not 30s; pill margins no longer
+  eat clicks (forward-mouse-events pattern, new pill:set-interactive IPC);
+  tray ⚠ rows get "Wasn't pasted" legend; Relay row dev-only; splash boot
+  errors in plain words. [many]
+- ☑ docs: README/SETUP/ARCHITECTURE/REFACTOR/RELAY_PROTOCOL synced to code
+  (agent pass, 8 fixes; ARCHITECTURE safety-timer line re-fixed to 25s).
 
-## 3. Settings window's cleanup default disagrees with the app (silent flip)  ☑ done
-Files: src/settings.js, scripts/unit/settings.test.js
-- BUG: main.js runs cleanup unless CLEANUP_ENABLED==="false" (default ON);
-  settingsView reports OFF when unset. On a fresh install, opening Settings
-  and pressing Save writes CLEANUP_ENABLED=false — silently disabling the
-  AI tidy-up that was running. (Current machine sets it explicitly, so it
-  doesn't bite here — it bites fresh installs.)
-- Fix: settingsView default true; update the test that pinned the wrong value.
+## PENDING — next session (self-contained details)
+1. src/benchmark-run.js (Windows engine flow):
+   a) The finally block restores WHISPER_MODEL but never stops the benchmark
+      whisper-server → live dictation silently keeps using the BENCHMARK
+      model until restart (ensureWhisperServer caches; transcribePcm reads
+      WHISPER_SERVER_URL fresh). FIX: in finally, call stopWhisperServer()
+      and delete process.env.WHISPER_SERVER_URL after restoring the env.
+      [high, 2 verifiers confirmed]
+   b) postWav's fetch (~line 103) has no timeout → wedged server pins the
+      Settings UI on "Testing speed…" forever. FIX: signal:
+      AbortSignal.timeout(120000) + plain-English error. [med]
+2. src/hardware.js: probeCapability runs execFileSync wmic (4s timeout) +
+   PowerShell fallback (~1-3s) ON THE MAIN PROCESS at every Settings open and
+   every benchmark. FIX: memoize (module-level cache; hardware doesn't change
+   mid-session). [med]
+3. public/settings.html:
+   a) benchBtn handler shows #engineResult (which CONTAINS the Use on-device
+      button) BEFORE the `if (!res.ok)` early-return → a failed download
+      still offers "Use on-device" (engine:apply now refuses, returning
+      { error } — surface that error string in the panel, and wrap the two
+      choice buttons in a div hidden when !res.ok). [high]
+   b) Engine dropdown says "(offline, on this Mac)" while the panel below
+      says local isn't available on this platform; cleanup hint mentions a
+      "cleanup API key" field that doesn't exist (env-only concept); save
+      failure says "check the app". FIX: copy changes (use "this computer",
+      reconcile panel text, OpenAI-key wording, drop "check the app"). [med]
+   c) engine:apply response can now be { error } — renderer must show it
+      (currently assumes a settings view comes back). [REQUIRED to match the
+      committed main.js change]
+4. Tests:
+   a) scripts/parity/dictation-flow.test.js test 5: the finally block
+      restores the real OPENAI_API_KEY BEFORE the client connects, but the
+      relay reads the key per-connection → test can never fail; burns 10s
+      then skips. FIX: keep the bad key until after the failure assertion
+      (t.after restore). Also fix the stale comment (~line 174) claiming the
+      relay swallows 401s (forwardUnexpectedResponse exists). [high+low]
+   b) scripts/cleanup-test.js: set process.exitCode = passed===total?0:1. [med]
+   c) scripts/unit/recordings.test.js:98: path.split("/") breaks on Windows
+      → use basename(). [med]
+   d) NEW scripts/unit/dictation-session.test.js (~6 tests: busy guard,
+      safety timer, releaseAt reset — module is pure, injectable timeout). [med]
+   e) scripts/unit/mic-health.test.js: add cases for the new holdMs /
+      no-frames dead classification (long hold + 0 bytes → dead; short tap →
+      ignore; holdMs absent → old behavior). [med]
+   f) package.json: add "test": "npm run test:unit". [low]
+5. REVIEW GATE for this whole fix pass (adversarial + simplicity subagents
+   over `git diff HEAD~1`), then full test run.
+6. SHIP: pnpm build → replace /Applications/GVoice.app → relaunch (same
+   bundle id/team, TCC persists). Manual smoke: dictate; check pill buttons
+   clickable + margins click-through; sleep→wake→dictate.
 
-## 4. Dead file + stale docs  ☑ done
-- Delete public/setup.html — the "main window" of the app's first iteration;
-  nothing loads it (verified: no references in any js/html).
-- SETUP.md + docs/ARCHITECTURE.md: remove/replace the setup.html rows.
-- README.md Troubleshooting: debug.log lives in the app-data folder when the
-  installed app runs (moved 2026-06-09); README still says repo-root only.
-- realtime-relay.js JSDoc: deepgramModel default says "nova-2" (code: nova-3);
-  deepgramLanguage default says "hr" (code: null = read env per connection).
-- pill.html comment: "Backstopped by main's safety timer (12s/45s)" — actual
-  is holdMs+15s (21s/45s).
-
-## 5. Verify  ☑ done
-- node --check on touched files; pnpm test:unit; pnpm test:parity.
-- Review gate (adversarial + simplicity) — subagents if the session limit
-  allows, otherwise honest self-review noted in notes.md.
-- Commit to main (NO push). Rebuild + reinstall /Applications/GVoice.app,
-  relaunch (established ship step for this app).
+## DEFERRED (decided, do not re-litigate without need)
+- CUDA-broken-install in-app CPU fallback (design work, Windows-only).
+- typing.js leading-space-into-empty-field (behavior taste; needs
+  focusedFieldValue pre-read).
+- history.js electron decouple + unit tests (initHistory(dir) refactor).
+- pill/vocab renderer crash recovery; press-during-reload swallow;
+  settings:save write-failure surfacing in UI; model checksum validation;
+  setup-whisper-windows.ps1 partial-download check; savedForegroundHwnd
+  nulling before pill positioning (multi-monitor pill jump); .part orphan
+  cleanup (single-flight guard covers the corruption case).
+- REFUTED by verifiers (don't redo): model change without restart claim;
+  WS-close-after-commit watchdog claim; re-press drop (alreadyFinalized)
+  claim; cleanup enumeration flakiness rewrite.
