@@ -171,19 +171,23 @@
         overPill = false;
       }
 
+      // After the user acts on a button, hold the pill just long enough for the
+      // confirmation to register, then go — and make that the new linger, or the
+      // hover re-arm below would put the full 30s back after they're done.
+      const BUTTON_LINGER_MS = 1400;
+      function lingerAfterAction() {
+        currentHideMs = BUTTON_LINGER_MS;
+        armHide(BUTTON_LINGER_MS);
+      }
+
       copyBtn.addEventListener("click", () => {
         window.pillBridge.copy();
         copyBtn.textContent = "Copied ✓";
-        // Hold the pill a touch longer so the confirmation registers — and
-        // make that the new linger, or the mouseleave re-arm below would put
-        // the full 30s back after the user already got what they came for.
-        currentHideMs = 1400;
-        armHide(1400);
+        lingerAfterAction();
       });
       openBtn.addEventListener("click", () => {
         window.pillBridge.openRecording();
-        currentHideMs = 1400;
-        armHide(1400);
+        lingerAfterAction();
       });
 
       // The window is click-through with forwarded mouse moves (see main.js);

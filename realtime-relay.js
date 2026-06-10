@@ -68,9 +68,11 @@ export function attachRealtimeRelay(server, options = {}) {
   server.on("upgrade", (request, socket, head) => {
     const url = new URL(request.url || "/", `http://${request.headers.host}`);
     if (url.pathname !== path) {
-      // Fail fast instead of leaving the TCP socket half-open until the
-      // client's own timeout.
-      socket.destroy();
+      // Fail fast (don't leave the TCP socket half-open until the client's own
+      // timeout) — but ONLY when we're the sole upgrade handler. The relay is a
+      // drop-in for any host server; if the host mounts its own WS endpoint on
+      // another path, its upgrades arrive here too and must be left untouched.
+      if (server.listenerCount("upgrade") === 1) socket.destroy();
       return;
     }
     browserSockets.handleUpgrade(request, socket, head, (clientSocket) => {

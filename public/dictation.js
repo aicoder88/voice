@@ -422,6 +422,11 @@ function handleMicLost(reason) {
   // pipeline would double-report (failure pill over this mic warning).
   clearTimeout(drainTimer);
   draining = false;
+  // Same reason for the partial-transcript fallback: it's gated only by
+  // alreadyFinalized (not failureHandled), so leaving it armed would paste a
+  // partial ~1.2s after this mic warning — exactly the double-report above.
+  clearTimeout(fallbackTimer);
+  fallbackTimer = null;
   teardownCapture(true); // full rebuild — a partial one can keep a wedged context
   silentStreak = 0;
   clearFailureTimer();

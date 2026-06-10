@@ -294,17 +294,30 @@
         el("useCloudBtn").textContent = v.fastEnough ? "Keep cloud" : "Keep cloud (recommended)";
       });
 
+      // engine:apply refuses to point at a model that isn't on disk and returns
+      // { error } instead of a settings view. Show it in the engine panel rather
+      // than passing { error } to fill() (which would read undefined fields and
+      // silently break the form while the switch looked like it succeeded).
+      function showEngineError(message) {
+        const box = el("engineResult");
+        box.style.display = "block";
+        box.className = "engineBox warn";
+        el("engineVerdict").textContent = message;
+      }
+
       el("useLocalBtn").addEventListener("click", async () => {
-        const view = await window.settingsBridge.engineApply({ provider: "whisper-local", modelName: lastBenchModel || el("localModel").value });
-        fill(view);
+        const res = await window.settingsBridge.engineApply({ provider: "whisper-local", modelName: lastBenchModel || el("localModel").value });
+        if (res && res.error) { showEngineError(res.error); return; }
+        fill(res);
         setStatus("On-device engine set as your default.", true);
       });
 
       el("useCloudBtn").addEventListener("click", async () => {
         const cur = el("provider").value;
         const cloud = cur === "whisper-local" ? "deepgram" : cur;
-        const view = await window.settingsBridge.engineApply({ provider: cloud });
-        fill(view);
+        const res = await window.settingsBridge.engineApply({ provider: cloud });
+        if (res && res.error) { showEngineError(res.error); return; }
+        fill(res);
         setStatus("Cloud engine kept. Add its API key below if you haven't.", true);
       });
 
