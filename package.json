@@ -2,6 +2,8 @@
   "name": "gvoice",
   "version": "1.0.0",
   "private": true,
+  "description": "GVoice — hold-to-talk voice dictation that types out what you say.",
+  "author": "Drago",
   "type": "module",
   "main": "main.js",
   "scripts": {
@@ -27,6 +29,7 @@
   "build": {
     "appId": "com.purr.gvoice",
     "productName": "GVoice",
+    "npmRebuild": false,
     "files": [
       "main.js",
       "preload.cjs",

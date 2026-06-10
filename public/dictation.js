@@ -42,6 +42,15 @@ const MIN_FAILURE_BYTES = 4800;
 // isn't mistaken for a failure. Separate from the delta-flush fallback below.
 const FAILURE_MS = Number(window.DICTATION_FAILURE_MS || 20000);
 
+// Tail drain. The mic worklet delivers audio in buffered bursts, so at the
+// instant the key is released the last ~tens-to-hundreds of ms of speech may not
+// have been streamed yet — releasing mid-word would otherwise clip the final
+// word or two. On release we keep streaming for this long, THEN commit, so the
+// tail reaches the engine. Tunable via window.DICTATION_TAIL_MS.
+const TAIL_MS = Number(window.DICTATION_TAIL_MS || 250);
+let draining = false;
+let drainTimer = null;
+
 // Rolling pre-roll buffer of the most recent mic audio. The capture pipeline
 // runs continuously once warmed, so on key-press we can flush the last ~600ms
 // into the buffer — this recovers words the speaker began saying right as (or
@@ -316,7 +325,9 @@ async function initCapture() {
     while (prerollBytes > PREROLL_MAX_BYTES && prerollChunks.length > 1) {
       prerollBytes -= prerollChunks.shift().byteLength;
     }
-    if (!isRecording) return;
+    // Stream while actively recording AND during the post-release tail drain, so
+    // the last word(s) the worklet hadn't yet delivered still reach the engine.
+    if (!isRecording && !draining) return;
     // Track the loudest frame of this hold so stopRecording can tell a dead mic
     // (sustained ~0) from real speech.
     if (typeof peak === "number" && peak > utterancePeak) utterancePeak = peak;
@@ -429,6 +440,9 @@ async function rebuildCapture(reason) {
 
 async function startRecording(profile) {
   if (isRecording) return;
+  // A new press during the previous utterance's tail drain supersedes it: cancel
+  // the pending commit so this fresh recording's frames aren't committed early.
+  if (draining) { clearTimeout(drainTimer); draining = false; }
   activeProfile = profile || null;
   if (activeProfile) {
     log("Profile: lang=" + (activeProfile.language || "default") + " model=" + (activeProfile.model || "default"));
@@ -513,8 +527,22 @@ async function startRecording(profile) {
 function stopRecording() {
   if (!isRecording) return;
   isRecording = false;
+  // Keep streaming the trailing audio for a short grace period before committing,
+  // so a word still being spoken as the key is released isn't clipped. The
+  // worklet keeps sending frames while `draining` is true (see onmessage).
+  draining = true;
   setStatus("Finalizing…");
-  log("Mic stopped, committing buffer");
+  log("Mic released, draining tail (" + TAIL_MS + "ms) before commit");
+  clearTimeout(drainTimer);
+  drainTimer = setTimeout(finishUtterance, TAIL_MS);
+}
+
+// Commit the captured audio (now including the drained tail) and arm the
+// finalize/failure timers. Split out of stopRecording so the tail can stream in
+// between the key release and this commit.
+function finishUtterance() {
+  draining = false;
+  log("Committing buffer");
 
   // Dead-mic backstop (shared, unit-tested logic in /mic-health.js). A hold
   // whose loudest frame is EXACTLY 0 is digital silence — a dead pipeline, never
@@ -590,3 +618,14 @@ function u8ToBase64(bytes) {
 
 setStatus("Ready - waiting for hotkey");
 log("Dictation worker loaded");
+
+// Warm the mic + audio pipeline at launch so the FIRST dictation is as fast as
+// the rest. Without this, the one-time getUserMedia + AudioContext + worklet
+// setup is paid on the user's first key-press, making it feel sluggish while
+// every later press is instant. initCapture() is idempotent and leaves the mic
+// muted (not recording) until a press, so this only pre-loads — it doesn't
+// start capturing speech. A failure here (mic blocked/in use) is non-fatal:
+// the next press just falls back to the original lazy path.
+initCapture()
+  .then(() => log("Capture pre-warmed at startup"))
+  .catch((error) => log("Startup pre-warm skipped: " + (error?.message || error)));

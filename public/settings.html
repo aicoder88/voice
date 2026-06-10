@@ -62,6 +62,19 @@
       .save:hover { background: #4ae3aa; }
       .status { color: #8497a8; font-size: 12.5px; }
       .status.ok { color: #4ae3aa; }
+      button.secondary.nobg:hover { background: rgba(74,163,255,0.24); color: #fff; }
+      .engineSuggest {
+        background: #1b2a3a; border: 1px solid #294a6b; border-radius: 9px;
+        padding: 9px 11px; color: #cfe2f5; font-size: 12.5px; line-height: 1.45;
+      }
+      .engineBox {
+        margin-top: 10px; padding: 10px 12px; border-radius: 9px;
+        background: #19202a; border: 1px solid #2c3540; font-size: 12.5px; line-height: 1.45;
+      }
+      .engineBox.ok { border-color: #2f6f4f; background: #16241c; }
+      .engineBox.warn { border-color: #6b5a29; background: #241f14; }
+      .bar { margin-top: 8px; height: 7px; background: #2c3540; border-radius: 5px; overflow: hidden; }
+      .barfill { height: 100%; width: 0%; background: #4aa3ff; transition: width 0.15s linear; }
     </style>
   </head>
   <body>
@@ -77,6 +90,32 @@
           <option value="whisper-local">Local Whisper (offline, on this Mac)</option>
         </select>
         <div class="hint">Cloud engines are fast and accurate but need an internet connection and an API key. Local Whisper runs entirely on your machine — no key, no internet, nothing leaves the computer.</div>
+      </div>
+
+      <div class="field" id="enginePanel">
+        <label class="row">On-device engine (free, offline)</label>
+        <div class="engineSuggest" id="engineSuggest">Checking your computer…</div>
+        <div class="inline" style="margin-top:10px">
+          <select id="localModel" style="flex:1">
+            <option value="ggml-base-q5_1.bin">Base model — smaller &amp; faster (57 MB)</option>
+            <option value="ggml-small-q5_1.bin">Small model — more accurate (182 MB)</option>
+          </select>
+        </div>
+        <div class="hint">Pick which model to set up. Bigger = more accurate but slower to download and run.</div>
+        <div style="margin-top:10px">
+          <button class="secondary nobg" id="benchBtn" type="button">Test this engine on my computer</button>
+        </div>
+        <div class="engineBox" id="engineProgress" style="display:none">
+          <div id="engineStage">Working…</div>
+          <div class="bar" id="engineBarWrap" style="display:none"><div class="barfill" id="engineBar"></div></div>
+        </div>
+        <div class="engineBox" id="engineResult" style="display:none">
+          <div id="engineVerdict"></div>
+          <div class="inline" style="margin-top:10px">
+            <button class="save" id="useLocalBtn" type="button">Use on-device</button>
+            <button class="secondary nobg" id="useCloudBtn" type="button">Keep cloud</button>
+          </div>
+        </div>
       </div>
 
       <div class="field">
@@ -194,7 +233,83 @@
         box.style.display = "block";
       });
 
+      // --- On-device engine panel: suggest → test (download+benchmark) → choose
+      let lastBenchModel = null;
+
+      window.settingsBridge.onEngineProgress((p) => {
+        el("engineStage").textContent = p.stage || "Working…";
+        const wrap = el("engineBarWrap");
+        if (p && typeof p.fraction === "number" && p.fraction >= 0) {
+          wrap.style.display = "block";
+          el("engineBar").style.width = Math.round(p.fraction * 100) + "%";
+        } else {
+          wrap.style.display = "none"; // indeterminate (no known total) or a plain stage
+        }
+      });
+
+      async function initEnginePanel() {
+        let info;
+        try { info = await window.settingsBridge.engineProbe(); } catch { return; }
+        const suggest = el("engineSuggest");
+        // Mac (and anything non-Windows) has no on-device engine in this version.
+        if (info.platform && info.platform !== "win32") {
+          suggest.textContent = "The free on-device engine isn't available on this platform yet — use a cloud engine above (paste your key below).";
+          el("benchBtn").style.display = "none";
+          el("localModel").style.display = "none";
+          return;
+        }
+        suggest.textContent = info.suggestion ? info.suggestion.text : "";
+        if (info.recommendedModel) el("localModel").value = info.recommendedModel;
+        if (info.currentModel) el("localModel").value = info.currentModel;
+      }
+
+      el("benchBtn").addEventListener("click", async () => {
+        const model = el("localModel").value;
+        lastBenchModel = model;
+        el("benchBtn").disabled = true;
+        el("engineResult").style.display = "none";
+        el("engineProgress").style.display = "block";
+        el("engineStage").textContent = "Getting ready…";
+        el("engineBarWrap").style.display = "none";
+        let res;
+        try {
+          res = await window.settingsBridge.engineBenchmark({ model });
+        } catch (err) {
+          res = { ok: false, error: "The speed test couldn't run." };
+        }
+        el("engineProgress").style.display = "none";
+        el("benchBtn").disabled = false;
+        const box = el("engineResult");
+        box.style.display = "block";
+        if (!res.ok) {
+          box.className = "engineBox warn";
+          el("engineVerdict").textContent = res.error || "The speed test couldn't run.";
+          return;
+        }
+        const v = res.verdict;
+        box.className = "engineBox " + (v.fastEnough ? "ok" : "warn");
+        el("engineVerdict").textContent = v.reason;
+        // Lead with what we suggest: the green/primary button is the recommendation.
+        el("useLocalBtn").textContent = v.fastEnough ? "Use on-device (recommended)" : "Use on-device anyway";
+        el("useCloudBtn").textContent = v.fastEnough ? "Keep cloud" : "Keep cloud (recommended)";
+      });
+
+      el("useLocalBtn").addEventListener("click", async () => {
+        const view = await window.settingsBridge.engineApply({ provider: "whisper-local", modelName: lastBenchModel || el("localModel").value });
+        fill(view);
+        setStatus("On-device engine set as your default.", true);
+      });
+
+      el("useCloudBtn").addEventListener("click", async () => {
+        const cur = el("provider").value;
+        const cloud = cur === "whisper-local" ? "deepgram" : cur;
+        const view = await window.settingsBridge.engineApply({ provider: cloud });
+        fill(view);
+        setStatus("Cloud engine kept. Add its API key below if you haven't.", true);
+      });
+
       window.settingsBridge.get().then(fill);
+      initEnginePanel();
     </script>
   </body>
 </html>

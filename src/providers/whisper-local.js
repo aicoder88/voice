@@ -34,18 +34,59 @@ const MIN_PCM_BYTES = 4800; // 0.1s @ 24 kHz mono int16
 // (~1.5% of full scale). Tunable via WHISPER_SILENCE_PEAK; set to 0 to disable.
 const SILENCE_PEAK = Number(process.env.WHISPER_SILENCE_PEAK ?? 500);
 
-// Stock phrases Whisper emits on silence/noise. Matched against the transcript
-// after lowercasing and stripping everything but letters/digits/spaces, so
-// "Thank you." and "thank you" collapse to the same key. Whole-string match
-// only — a real sentence that merely starts with one of these is untouched.
+// Stock phrases Whisper emits on silence/noise — the YouTube-subtitle artifacts
+// it "fills in" when handed audio it can't parse ("thanks for watching",
+// "subscribe", "music", …). It produces them in MANY languages (the Turkish
+// "Bu kanalıma abone olmayı unutmayın" = "don't forget to subscribe to my
+// channel" being a notorious one), so this list is multilingual. Entries are
+// stored in the SAME folded-ASCII form normalizeForMatch produces (lowercased,
+// diacritics removed, punctuation stripped) so "Hvala!" and "hvala" — and
+// "olmayı" and "olmayi" — collapse to one key. Whole-string match only: a real
+// sentence that merely starts with one of these is left untouched.
 const HALLUCINATION_PHRASES = new Set([
+  // English
   "you", "thank you", "thank you very much", "thanks", "thanks for watching",
   "thank you for watching", "thanks for watching everyone", "please subscribe",
-  "dont forget to subscribe", "like and subscribe", "bye", "bye bye", "goodbye",
-  "okay", "ok", "so", "hello", "hi", "the", "yeah", "uh", "um", "mm", "mhm",
-  "i", "co authored by", "subtitles by", "transcription by", "transcribed by",
-  "amaraorg", "music", "applause", "silence", "blank audio"
+  "dont forget to subscribe", "like and subscribe", "subscribe", "bye", "bye bye",
+  "goodbye", "okay", "ok", "so", "hello", "hi", "the", "yeah", "uh", "um", "mm",
+  "mhm", "i", "co authored by", "subtitles by", "transcription by", "transcribed by",
+  "amaraorg", "music", "applause", "silence", "blank audio",
+  // Croatian
+  "hvala", "hvala vam", "hvala na gledanju", "hvala vam na gledanju",
+  "hvala na paznji", "hvala vam na paznji", "ne zaboravite se pretplatiti",
+  "pretplatite se", "pretplatite se na moj kanal", "lajkajte i pretplatite se",
+  "titlovi", "prijevod", "vidimo se", "bok", "pozdrav",
+  // Turkish (the one this user actually hit)
+  "bu kanalima abone olmayi unutmayin", "abone olmayi unutmayin",
+  "kanalima abone olun", "abone ol", "izlediginiz icin tesekkurler",
+  "tesekkurler", "tesekkur ederim",
+  // German / Spanish / French / Italian / Portuguese
+  "danke", "vielen dank", "danke furs zuschauen", "abonniert",
+  "gracias", "gracias por ver", "suscribete",
+  "merci", "merci davoir regarde", "abonnez vous",
+  "grazie", "grazie per la visione",
+  "obrigado", "inscreva se"
 ]);
+
+// Fold a string to lowercase ASCII for hallucination matching: strip combining
+// diacritics (č→c, ž→z, ü→u …) and map the special letters NFD doesn't
+// decompose (Turkish dotless ı→i, Croatian đ→d, ł→l, ø→o), then drop anything
+// that isn't a letter/digit/space. Cyrillic/CJK fold away entirely (→ empty),
+// which is fine — they're caught as empty.
+function normalizeForMatch(text) {
+  return (text || "")
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .replace(/ı/g, "i")
+    .replace(/đ/g, "d")
+    .replace(/ł/g, "l")
+    .replace(/ø/g, "o")
+    .replace(/['’']/g, "") // contractions collapse: don't → dont, d'avoir → davoir
+    .replace(/[^a-z0-9 ]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 /**
  * Peak absolute amplitude across an int16 PCM buffer (0..32768).
@@ -73,7 +114,7 @@ function peakAmplitude(pcm) {
  * @param {string} text
  * @returns {string}
  */
-function sanitizeTranscript(text) {
+export function sanitizeTranscript(text) {
   if (!text) return "";
   const stripped = text
     .replace(/\([^()]*\)/g, " ")
@@ -82,10 +123,11 @@ function sanitizeTranscript(text) {
     .replace(/\s+/g, " ")
     .trim();
   if (!stripped) return "";
-  const normalized = stripped.toLowerCase().replace(/[^a-z0-9 ]/g, "").replace(/\s+/g, " ").trim();
-  if (HALLUCINATION_PHRASES.has(normalized)) return "";
+  if (HALLUCINATION_PHRASES.has(normalizeForMatch(stripped))) return "";
   return stripped;
 }
+
+export { normalizeForMatch };
 
 // Whisper's initial-prompt accepts ~224 tokens (~1000 chars of typical
 // English). Anything longer gets silently truncated by the model, so we
@@ -401,7 +443,13 @@ export async function attach(clientSocket, { bin, model }) {
       }
       try {
         const prompt = await loadPrompt();
-        const raw = await transcribePcm(pcm, SAMPLE_RATE, bin, model, prompt);
+        // Read the language the same way deepgram.js does — fresh from the env
+        // the right-Ctrl toggle writes (main.js sets process.env.WHISPER_LANGUAGE),
+        // so flipping auto/hr/en applies on the very next dictation with no
+        // restart. Without this, whisper-server defaults to English and decodes
+        // Croatian speech as garbage. "auto" lets whisper detect the language.
+        const language = (process.env.WHISPER_LANGUAGE || "auto").toLowerCase();
+        const raw = await transcribePcm(pcm, SAMPLE_RATE, bin, model, prompt, language);
         const transcript = sanitizeTranscript(raw);
         if (raw && !transcript) {
           console.error("[relay] whisper-local sanitizer dropped: " + JSON.stringify(raw));
@@ -442,16 +490,22 @@ export async function attach(clientSocket, { bin, model }) {
  * @param {string} bin
  * @param {string} model
  * @param {string} prompt
+ * @param {string} [language] "auto" (detect), or an ISO code like "hr" / "en"
  * @returns {Promise<string>}
  */
-async function transcribePcm(pcmBuffer, sampleRate, bin, model, prompt) {
+async function transcribePcm(pcmBuffer, sampleRate, bin, model, prompt, language = "auto") {
   const wav = wrapWav(pcmBuffer, sampleRate);
   const serverUrl = process.env.WHISPER_SERVER_URL;
   const t0 = Date.now();
+  // "auto"/"multi" means detect — but constrained to hr/en only, so a wrong-
+  // language hallucination (the Turkish "subscribe" artifact) can't appear.
+  const autoHrEn = language === "auto" || language === "multi";
   if (serverUrl) {
     try {
-      const text = await runWhisperServer(serverUrl, wav, prompt);
-      console.error("[relay] whisper-local (server) " + (Date.now() - t0) + "ms: " + JSON.stringify(text));
+      const text = autoHrEn
+        ? await transcribeHrEn(serverUrl, wav, prompt)
+        : (await runWhisperServer(serverUrl, wav, prompt, language)).text;
+      console.error("[relay] whisper-local (server) " + (Date.now() - t0) + "ms [" + language + "]: " + JSON.stringify(text));
       return text;
     } catch (err) {
       console.error("[relay] whisper-server failed, falling back to CLI:", err.message);
@@ -461,8 +515,8 @@ async function transcribePcm(pcmBuffer, sampleRate, bin, model, prompt) {
   const wavPath = join(dir, "input.wav");
   await writeFile(wavPath, wav);
   try {
-    const text = await runWhisper(bin, model, wavPath, prompt);
-    console.error("[relay] whisper-local (cli) " + (Date.now() - t0) + "ms: " + JSON.stringify(text));
+    const text = await runWhisper(bin, model, wavPath, prompt, language);
+    console.error("[relay] whisper-local (cli) " + (Date.now() - t0) + "ms [" + language + "]: " + JSON.stringify(text));
     return text;
   } finally {
     unlink(wavPath).catch(() => {});
@@ -473,16 +527,22 @@ async function transcribePcm(pcmBuffer, sampleRate, bin, model, prompt) {
  * @param {string} url
  * @param {Buffer} wavBuffer
  * @param {string} prompt
- * @returns {Promise<string>}
+ * @param {string} [language] "auto" (whisper detects) or an ISO code like "hr"
+ * @returns {Promise<{ text: string, confidence: number, language: string }>}
  */
-async function runWhisperServer(url, wavBuffer, prompt) {
+async function runWhisperServer(url, wavBuffer, prompt, language = "auto") {
   const form = new FormData();
   // Node Buffer is structurally a BlobPart, but TS's lib narrows the buffer's
   // underlying type to ArrayBuffer (rejecting SharedArrayBuffer-backed views).
   // Cast through to silence the false positive — Buffer is always non-shared.
   form.append("file", new Blob([/** @type {ArrayBuffer} */ (wavBuffer.buffer)], { type: "audio/wav" }), "audio.wav");
-  form.append("response_format", "json");
+  // verbose_json carries per-segment avg_logprob, which we average into a single
+  // confidence so the hr/en picker can choose the more confident transcript.
+  form.append("response_format", "verbose_json");
   form.append("temperature", "0.0");
+  // Without this, whisper-server defaults to English and mis-decodes other
+  // languages. "auto" enables its built-in language detection.
+  form.append("language", language || "auto");
   if (prompt) form.append("prompt", prompt);
   // One retry on a transient failure (a dropped connection during the POST, or a
   // 5xx while the server is briefly busy) before the caller falls back to the
@@ -502,7 +562,46 @@ async function runWhisperServer(url, wavBuffer, prompt) {
     }
   );
   const text = (json.text || "").replace(/\s+/g, " ").trim();
-  return text;
+  return { text, confidence: avgLogprob(json.segments), language: json.language || language };
+}
+
+/** Mean avg_logprob across whisper segments (closer to 0 = more confident).
+ *  Empty/missing → a very low score so an empty leg never wins a tie. */
+function avgLogprob(segments) {
+  if (!Array.isArray(segments) || segments.length === 0) return -10;
+  let sum = 0;
+  let count = 0;
+  for (const seg of segments) {
+    if (seg && typeof seg.avg_logprob === "number") { sum += seg.avg_logprob; count += 1; }
+  }
+  return count ? sum / count : -10;
+}
+
+/**
+ * Constrain whisper's language guess to ENGLISH or CROATIAN only: transcribe the
+ * clip forced to each, then keep the better one. This makes a stray Turkish (or
+ * any other-language) hallucination structurally impossible — neither leg can
+ * produce it — and mirrors how the Deepgram provider runs parallel hr/en legs.
+ * The pick prefers the leg that survives the hallucination sanitizer (so a junk
+ * "thanks for watching" leg loses to a real one), then higher confidence.
+ *
+ * @param {string} url @param {Buffer} wav @param {string} prompt
+ * @returns {Promise<string>}
+ */
+async function transcribeHrEn(url, wav, prompt) {
+  const [en, hr] = await Promise.all([
+    runWhisperServer(url, wav, prompt, "en"),
+    runWhisperServer(url, wav, prompt, "hr")
+  ]);
+  const enClean = sanitizeTranscript(en.text);
+  const hrClean = sanitizeTranscript(hr.text);
+  // Prefer a leg whose text survives sanitization; if only one does, take it.
+  let pick;
+  if (enClean && !hrClean) pick = en;
+  else if (hrClean && !enClean) pick = hr;
+  else pick = en.confidence >= hr.confidence ? en : hr;
+  console.error(`[relay] whisper hr/en pick=${pick.language} (en:conf=${en.confidence.toFixed(2)} hr:conf=${hr.confidence.toFixed(2)})`);
+  return pick.text;
 }
 
 /**
@@ -510,16 +609,17 @@ async function runWhisperServer(url, wavBuffer, prompt) {
  * @param {string} model
  * @param {string} wavPath
  * @param {string} prompt
+ * @param {string} [language] "auto" (detect) or an ISO code like "hr" / "en"
  * @returns {Promise<string>}
  */
-function runWhisper(bin, model, wavPath, prompt) {
+function runWhisper(bin, model, wavPath, prompt, language = "auto") {
   return new Promise((resolve, reject) => {
     const args = [
       "-m", model,
       "-f", wavPath,
       "-nt",
       "-np",
-      "-l", "auto",
+      "-l", language || "auto",
       "--no-fallback",
       "-t", "4"
     ];

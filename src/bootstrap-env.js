@@ -24,13 +24,24 @@ app.setName("GVoice");
 // first time this self-contained build runs — never as the live home.
 const LEGACY_HOME = "/Users/macmini/dev/voice";
 
-// Where the app's config (.env) and the Whisper model live. Kept OUTSIDE the
-// app bundle so real API keys never ship inside a distributable .app. Unpackaged
-// this is the repo (cwd). Packaged it now defaults to userData — a writable,
-// install-independent location — so renaming, moving, or cleaning up the dev
-// repo no longer silently breaks the installed app. GVOICE_HOME still overrides.
+// Where the app's config (.env), the Whisper model, and the downloaded engine
+// binaries live. Kept OUTSIDE the app bundle so (a) real API keys never ship
+// inside a distributable, and (b) the app can WRITE here — the macOS .app bundle
+// is read-only/signed, so a downloaded model must never land inside it.
+//
+// Dev launch (`electron .` from the repo): HOME = cwd, so the models/ + bin/
+// already checked into the repo are used as-is. Packaged launch: HOME =
+// per-user data dir (app.getPath('userData') — writable on Windows AND macOS),
+// where the first-run downloader drops the model + binaries. GVOICE_HOME
+// overrides either.
 const USERDATA_HOME = app.getPath("userData");
 const HOME = process.env.GVOICE_HOME || (app.isPackaged ? USERDATA_HOME : process.cwd());
+
+// One source of truth for where engine assets live, reused by the on-demand
+// downloader (src/model-download.js) and main.js so nothing guesses a path.
+export const APP_HOME = HOME;
+export const MODELS_DIR = join(HOME, "models");
+export const BIN_DIR = join(HOME, "bin");
 
 // First packaged boot into the new home with no .env yet: migrate the one from
 // the old dev-repo location if it's there, so an existing install keeps working
@@ -65,19 +76,31 @@ else dotenv.config();
 // .env this loaded — never a cwd-relative guess that misses in a packaged launch.
 export const ENV_FILE = envFile;
 
-// Default the Whisper model to an absolute path if the user hasn't pinned one.
-// Look in the new home first, then the legacy repo — so an existing install that
-// kept the model in the dev repo still finds it, while a fresh install can drop
-// the model into userData/models. If neither exists, WHISPER_MODEL stays unset
-// and main.js's onboarding surfaces "point GVoice at a model" instead of failing
-// per-dictation. A cwd-relative "./models/…" would miss in a packaged launch.
+// Default the Whisper model to an absolute path under HOME if the user hasn't
+// pinned one — a cwd-relative "./models/…" would miss in a packaged launch. We
+// pick the first model that actually exists from a preference list (the
+// multilingual small the repo ships, then the smaller base, then the
+// English-only build) so the default tracks whatever the downloader dropped.
+// Look in HOME's models first, then the legacy repo — so an existing install
+// that kept the model in the old dev repo still finds it. If none exists,
+// WHISPER_MODEL stays unset and main.js's onboarding surfaces "point GVoice at
+// a model" instead of failing per-dictation.
 if (!process.env.WHISPER_MODEL) {
-  const MODEL_NAME = "ggml-small.en-q5_1.bin";
-  for (const base of [HOME, LEGACY_HOME]) {
-    const model = join(base, "models", MODEL_NAME);
-    if (existsSync(model)) {
-      process.env.WHISPER_MODEL = model;
-      break;
+  const candidates = ["ggml-small-q5_1.bin", "ggml-base-q5_1.bin", "ggml-small.en-q5_1.bin"];
+  outer:
+  for (const base of [MODELS_DIR, join(LEGACY_HOME, "models")]) {
+    for (const name of candidates) {
+      const model = join(base, name);
+      if (existsSync(model)) { process.env.WHISPER_MODEL = model; break outer; }
     }
   }
+}
+
+// Same for the whisper-cli binary: prefer the one the downloader placed under
+// BIN_DIR; otherwise leave it unset so the PATH-based default (Homebrew on mac,
+// system PATH on Windows) still applies.
+if (!process.env.WHISPER_BIN) {
+  const exe = process.platform === "win32" ? "whisper-cli.exe" : "whisper-cli";
+  const bin = join(BIN_DIR, exe);
+  if (existsSync(bin)) process.env.WHISPER_BIN = bin;
 }

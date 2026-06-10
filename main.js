@@ -39,7 +39,7 @@ process.on("unhandledRejection", (reason) => {
   try { dlog("unhandledRejection", String(stack)); } catch {}
 });
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
 import * as vocab from "./src/vocab.js";
@@ -47,8 +47,12 @@ import { createCorrectionWatcher } from "./src/correction-watch.js";
 import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, focusedFieldValue, isForegroundWindow } from "./src/foreground.js";
 import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
 import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-local.js";
-import { ENV_FILE } from "./src/bootstrap-env.js";
+import { ENV_FILE, MODELS_DIR, BIN_DIR } from "./src/bootstrap-env.js";
 import { writeEnvFile, settingsView, patchFromView } from "./src/settings.js";
+import { probeCapability, recommendedAssets } from "./src/hardware.js";
+import { suggestBeforeBenchmark } from "./src/benchmark.js";
+import { runLocalBenchmark } from "./src/benchmark-run.js";
+import { ensureModel, ensureWindowsBinaries, MODELS } from "./src/model-download.js";
 import { saveRecording, pruneRecordings, clearRecordings } from "./src/recordings.js";
 import { appendFileSync, statSync, renameSync, unlinkSync, existsSync, mkdirSync } from "node:fs";
 import { mkdir as mkdirAsync } from "node:fs/promises";
@@ -771,13 +775,32 @@ function getCurrentLanguage() {
   return (process.env.WHISPER_LANGUAGE || DICTATION_LANGUAGES[0]).toLowerCase();
 }
 
+/** Human label for a language code, used in the tooltip + toggle notification. */
+function languageLabel(lang) {
+  if (lang === "hr") return "Croatian";
+  if (lang === "en") return "English";
+  return "Auto (Croatian + English)";
+}
+
 function toggleLanguage() {
   const current = getCurrentLanguage();
   const idx = DICTATION_LANGUAGES.indexOf(current);
   const next = DICTATION_LANGUAGES[(idx + 1) % DICTATION_LANGUAGES.length];
   process.env.WHISPER_LANGUAGE = next;
+  // Persist so the choice survives a restart (auto-detect is unreliable for short
+  // Croatian, so a user who forces HR expects it to stick). Surgical .env write.
+  try { writeEnvFile(envPath, { WHISPER_LANGUAGE: next }); } catch (err) {
+    console.error("[main] could not persist language:", err && err.message);
+  }
   debug("[main] language toggled " + current + " -> " + next);
   updateTrayTooltip();
+  // Brief on-screen confirmation — the tray icon is easy to miss, and forcing the
+  // language is now the reliable way to get Croatian, so the user needs to SEE it.
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title: "GVoice — dictation language", body: languageLabel(next) }).show();
+    }
+  } catch {}
   return next;
 }
 
@@ -786,9 +809,9 @@ function updateTrayTooltip() {
   const lang = getCurrentLanguage();
   const keyLabel = process.platform === "darwin" ? "right Option" : "right Alt";
   tray.setToolTip(
-    `Language: ${lang === "auto" ? "AUTO (hr/en detected per dictation)" : lang.toUpperCase()}\n` +
+    `Language: ${languageLabel(lang)}\n` +
     `Hold ${keyLabel} to dictate.\n` +
-    `Tap right Ctrl to cycle auto / hr / en.`
+    `Tap right Ctrl to cycle Auto / Croatian / English.`
   );
   try { tray.setImage(makeTrayIcon(lang)); } catch {}
 }
@@ -835,7 +858,7 @@ async function setupHotkey() {
     updateTrayTooltip();
     const altLabel = process.platform === "darwin"
       ? "right Option (⌥), left Ctrl+Cmd, or mouse back button"
-      : "right Alt";
+      : "Ctrl+Shift (either side)";
     console.log(`Global hotkeys active: hold ${altLabel} to dictate, tap right Ctrl to toggle hr/en.`);
   } catch (error) {
     console.error("Failed to start global hotkey:", error.message);
@@ -1168,30 +1191,80 @@ function setupIpc() {
   ipcMain.handle("settings:get", () => settingsView(process.env));
   ipcMain.handle("settings:save", async (_event, payload) => {
     const patch = patchFromView(payload || {});
-    const prevProvider = (process.env.STT_PROVIDER || "openai").toLowerCase();
     try {
       writeEnvFile(envPath, patch);
     } catch (err) {
       console.error("[main] settings write failed:", err && err.message);
     }
-    // Apply live so the next dictation honors the change without a restart. The
-    // relay reads keys fresh per connection (see realtime-relay.js); the
-    // dictation renderer reads the provider from its URL, so reload it on a
-    // provider switch.
-    for (const [key, value] of Object.entries(patch)) process.env[key] = value;
-    const newProvider = (process.env.STT_PROVIDER || "openai").toLowerCase();
-    dlog("settings-save", { keys: Object.keys(patch), providerChanged: newProvider !== prevProvider });
+    await applyEnvPatchLive(patch, "settings-save");
+    return settingsView(process.env);
+  });
 
-    if (!serverPort) {
-      // First-run path: the relay never booted (no key at launch). Now that a
-      // key may be present, try again and bring dictation fully up.
-      await bootRelayServer();
-      if (serverPort) await bringUpDictation();
-    } else if (newProvider !== prevProvider) {
-      reloadDictationWindow();
+  // --- On-device engine setup: probe → download+benchmark → apply ---------
+  // The settings window's "speech engine" panel drives these. The benchmark is
+  // the real decision-maker (a hardware guess is unreliable), so local is only
+  // ever kept after it measurably beats the cloud — or the user opts in anyway.
+  ipcMain.handle("engine:probe", () => {
+    const probe = probeCapability();
+    return {
+      probe,
+      suggestion: suggestBeforeBenchmark(probe),
+      models: MODELS,
+      recommendedModel: recommendedAssets(probe).model,
+      currentProvider: (process.env.STT_PROVIDER || "openai").toLowerCase(),
+      currentModel: process.env.WHISPER_MODEL ? basename(process.env.WHISPER_MODEL) : "",
+      platform: process.platform
+    };
+  });
+
+  ipcMain.handle("engine:benchmark", async (event, payload) => {
+    const probe = probeCapability();
+    const modelName = (payload && payload.model) || recommendedAssets(probe).model;
+    const variant = recommendedAssets(probe).variant; // cuda for NVIDIA, else cpu
+    const send = (stage, extra = {}) => {
+      try { event.sender.send("engine:progress", { stage, ...extra }); } catch {}
+    };
+    try {
+      if (process.platform !== "win32") {
+        throw new Error("The on-device engine isn't available on this platform yet — use a cloud engine.");
+      }
+      // 1) Engine binaries (skipped instantly if already present).
+      send("Getting the on-device engine ready…");
+      const bin = await ensureWindowsBinaries(variant, BIN_DIR, {
+        onProgress: (p) => send("Downloading the on-device engine…", p)
+      });
+      // 2) The speech model (only downloaded if missing).
+      const sizeMB = MODELS[modelName] ? MODELS[modelName].sizeMB : "?";
+      send(`Downloading the speech model (${sizeMB} MB)…`);
+      const model = await ensureModel(modelName, MODELS_DIR, {
+        onProgress: (p) => send(`Downloading the speech model (${sizeMB} MB)…`, p)
+      });
+      // 3) The real, timed speed test on this hardware.
+      send("Testing speed on your computer…");
+      const verdict = await runLocalBenchmark({ bin, model, onStage: (m) => send(m) });
+      dlog("engine-benchmark", { modelName, variant, elapsedMs: verdict.elapsedMs, fastEnough: verdict.fastEnough });
+      return { ok: true, verdict, modelName };
+    } catch (err) {
+      console.error("[main] engine benchmark failed:", err && err.message);
+      return { ok: false, error: (err && err.message) || "The speed test couldn't run." };
     }
-    updateTrayTooltip();
-    rebuildTrayMenu();
+  });
+
+  // Commit the user's choice: which engine to use (and, for local, which model).
+  ipcMain.handle("engine:apply", async (_event, payload) => {
+    const provider = (payload && payload.provider) || "deepgram";
+    /** @type {Record<string,string>} */
+    const patch = { STT_PROVIDER: provider };
+    if (provider === "whisper-local" && payload && payload.modelName) {
+      patch.WHISPER_MODEL = join(MODELS_DIR, payload.modelName);
+      if (process.platform === "win32") patch.WHISPER_BIN = join(BIN_DIR, "whisper-cli.exe");
+    }
+    try {
+      writeEnvFile(envPath, patch);
+    } catch (err) {
+      console.error("[main] engine apply write failed:", err && err.message);
+    }
+    await applyEnvPatchLive(patch, "engine-apply");
     return settingsView(process.env);
   });
   // Delete every saved recording (the privacy "wipe my voice clips" button).
@@ -1428,6 +1501,28 @@ function reloadDictationWindow() {
   dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html?provider=${provider}`);
 }
 
+// Apply an already-written .env patch to the LIVE app without a restart: mirror
+// it into process.env, then boot the relay (first run) or reload the dictation
+// window (provider switch) so the next dictation honors it. Shared by
+// settings:save and engine:apply so both take effect identically.
+async function applyEnvPatchLive(patch, source) {
+  const prevProvider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+  for (const [key, value] of Object.entries(patch)) process.env[key] = value;
+  const newProvider = (process.env.STT_PROVIDER || "openai").toLowerCase();
+  dlog(source, { keys: Object.keys(patch), providerChanged: newProvider !== prevProvider });
+
+  if (!serverPort) {
+    // First-run path: the relay never booted (no key at launch). Now that a key
+    // may be present, try again and bring dictation fully up.
+    await bootRelayServer();
+    if (serverPort) await bringUpDictation();
+  } else if (newProvider !== prevProvider) {
+    reloadDictationWindow();
+  }
+  updateTrayTooltip();
+  rebuildTrayMenu();
+}
+
 // First-run / misconfiguration check: returns a short, plain-English reason the
 // app can't dictate yet (no .env, or the active engine's key/model is missing),
 // or null when everything needed is present. Drives the auto-opened Settings
@@ -1514,6 +1609,12 @@ app.whenReady().then(async () => {
   // model) so a fresh install isn't a dead end. Saving a working key there boots
   // the relay and brings dictation up without a restart (see settings:save).
   if (onboard) openSettingsWindow({ firstRun: true, reason: onboard });
+
+  // Pay the nut-js import cost at startup (Windows uses it for every paste) so
+  // the FIRST dictation types out as fast as the rest, not 300ms slower.
+  if (process.platform === "win32") {
+    import("./src/typing.js").then((m) => m.prewarmTyping()).catch(() => {});
+  }
 
   // Warm whisper-server at boot so the first dictation doesn't pay the model
   // load cost — and so any server orphaned by a previous crash is reaped now,

@@ -8,7 +8,14 @@
 //   under focus/security/RDP churn and produce a "frozen" app where the pill
 //   no longer appears. Polling can't be lost: it asks the kernel for the
 //   current bit, every tick. Latency: poll period + 0 = ~33 ms worst case.
-//   CPU: negligible (two GetAsyncKeyState calls per tick).
+//   CPU: negligible (a few GetAsyncKeyState calls per tick).
+//
+//   Hold-to-talk is Ctrl+Shift held together (EITHER side — left Ctrl+Shift,
+//   right Ctrl+Shift, or mixed). Earlier builds used right Alt, but on Windows
+//   the poll doesn't swallow the key, so a bare Alt activated the menu bar in
+//   classic apps (Notepad) and ate the paste. Ctrl+Shift never touches a menu
+//   or the Start menu, and — with no layout-switch hotkey assigned — never
+//   switches keyboard layout.
 //
 // macOS / Linux:
 //   Event-based via uiohook-napi. Uses its global keydown/keyup/mouse stream
@@ -26,7 +33,7 @@
 //     pressing it as part of a chord, does NOT toggle.
 
 import { createRequire } from "node:module";
-import { isRightAltDown, isRightCtrlDown } from "./foreground.js";
+import { isRightCtrlDown, isCtrlDown, isShiftDown } from "./foreground.js";
 import { createTapDetector, createHoldTracker } from "./hotkey-logic.js";
 
 const require = createRequire(import.meta.url);
@@ -67,36 +74,46 @@ export function startHotkey(callbacks) {
  * @returns {{ stop: () => void }}
  */
 function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
-  let altWas = false;
-  let ctrlWas = false;
+  let holdWas = false;
+  let shiftWas = false;
+  let rCtrlWas = false;
   const hold = createHoldTracker({
     onPress: () => {
-      debug("[hotkey] PRESS alt");
+      debug("[hotkey] PRESS ctrl+shift");
       try { onPress?.("alt"); } catch (error) { console.error("hotkey onPress error:", error); }
     },
     onRelease: () => {
-      debug("[hotkey] RELEASE alt");
+      debug("[hotkey] RELEASE ctrl+shift");
       try { onRelease?.("alt"); } catch (error) { console.error("hotkey onRelease error:", error); }
     }
   });
   const tap = createTapDetector({ windowMs: CTRL_TAP_WINDOW_MS });
 
   const tick = () => {
-    const altNow = isRightAltDown();
-    const ctrlNow = isRightCtrlDown();
+    const ctrlNow = isCtrlDown();        // either Ctrl
+    const shiftNow = isShiftDown();      // either Shift
+    const rCtrlNow = isRightCtrlDown();  // right Ctrl only, for the toggle tap
+    const holdNow = ctrlNow && shiftNow; // hold-to-talk = Ctrl+Shift together
 
-    if (altNow && !altWas) {
-      // Alt going down while a Ctrl tap is open means it was a chord, not a tap.
+    if (holdNow && !holdWas) {
+      // Chord engaged — it's a hold, never a Ctrl tap.
       tap.other();
-      hold.press("alt");
-    } else if (!altNow && altWas) {
-      hold.release("alt");
+      hold.press("ctrlShift");
+    } else if (!holdNow && holdWas) {
+      hold.release("ctrlShift");
     }
-    altWas = altNow;
+    holdWas = holdNow;
 
-    if (ctrlNow && !ctrlWas) {
-      tap.down();
-    } else if (!ctrlNow && ctrlWas) {
+    // Shift going down also cancels any in-progress right-Ctrl tap, so the
+    // Ctrl→Shift order of engaging the chord never leaks out as a toggle.
+    if (shiftNow && !shiftWas) tap.other();
+    shiftWas = shiftNow;
+
+    // Language toggle: a clean right-Ctrl tap with NO Shift involved. Arming
+    // only when Shift is up keeps the chord from ever registering as a tap.
+    if (rCtrlNow && !rCtrlWas) {
+      if (!shiftNow) tap.down();
+    } else if (!rCtrlNow && rCtrlWas) {
       if (tap.up()) {
         debug("[hotkey] TAP ctrl");
         try {
@@ -106,7 +123,7 @@ function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
         }
       }
     }
-    ctrlWas = ctrlNow;
+    rCtrlWas = rCtrlNow;
   };
 
   const timer = setInterval(tick, POLL_INTERVAL_MS);

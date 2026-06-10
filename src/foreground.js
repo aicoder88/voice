@@ -274,8 +274,12 @@ export function isForegroundWindow(hwnd) {
 
 // VK_RMENU = 0xA5 (right Alt only — VK_MENU 0x12 would match either Alt).
 const VK_RMENU = 0xA5;
-// VK_RCONTROL = 0xA3 (right Ctrl only — VK_CONTROL 0x11 would match both).
+// VK_RCONTROL = 0xA3 (right Ctrl only — used for the language-toggle tap).
 const VK_RCONTROL = 0xA3;
+// VK_CONTROL / VK_SHIFT match EITHER side — the hold-to-talk chord is
+// Ctrl+Shift from whichever hand the user prefers.
+const VK_CONTROL = 0x11;
+const VK_SHIFT = 0x10;
 
 function asyncKeyDown(/** @type {number} */ vk) {
   if (!GetAsyncKeyState) return false;
@@ -301,6 +305,22 @@ export function isRightAltDown() {
  */
 export function isRightCtrlDown() {
   return asyncKeyDown(VK_RCONTROL);
+}
+
+/**
+ * True iff EITHER Ctrl key is physically held down right now.
+ * @returns {boolean}
+ */
+export function isCtrlDown() {
+  return asyncKeyDown(VK_CONTROL);
+}
+
+/**
+ * True iff EITHER Shift key is physically held down right now.
+ * @returns {boolean}
+ */
+export function isShiftDown() {
+  return asyncKeyDown(VK_SHIFT);
 }
 
 /**

@@ -38,6 +38,17 @@ function nut() {
 }
 
 /**
+ * Pay the nut-js import cost (~300ms — it pulls in a large image stack) at
+ * startup instead of on the user's FIRST paste, so the first dictation types
+ * out as fast as every one after it. Fire-and-forget: the lazy path in
+ * pasteShortcut() still covers it if this never ran or failed.
+ * @returns {Promise<void>}
+ */
+export function prewarmTyping() {
+  return nut().then(() => {}, () => {});
+}
+
+/**
  * Send the paste shortcut (⌘V / Ctrl+V) to the frontmost app. macOS uses the
  * built-in `osascript` (no native module; needs the Accessibility / Automation
  * permission the app already requires for typing). Other platforms use nut-js.
