@@ -13,5 +13,9 @@ contextBridge.exposeInMainWorld("dictationBridge", {
   },
   onStop: (callback) => {
     ipcRenderer.on("dictation:stop", () => callback());
+  },
+  // main asks the renderer to rebuild its whole mic pipeline (system wake).
+  onRebuildCapture: (callback) => {
+    ipcRenderer.on("dictation:rebuild-capture", (_event, reason) => callback(reason));
   }
 });

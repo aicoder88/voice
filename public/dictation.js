@@ -1,3 +1,5 @@
+import { classifyHold } from "/mic-health.js";
+
 const targetSampleRate = 24000;
 const statusEl = document.getElementById("status");
 const logEl = document.getElementById("log");
@@ -339,9 +341,16 @@ async function initCapture() {
 }
 
 // Tear the capture graph down so the next initCapture() rebuilds onto the
-// current default device. Keeps the AudioContext + loaded worklet module
-// (both reusable); only the device-bound stream and nodes are dropped.
-function teardownCapture() {
+// current default device. By default keeps the AudioContext + loaded worklet
+// module (reusable) and drops only the device-bound stream and nodes.
+//
+// `full` ALSO closes the AudioContext and forgets the worklet, forcing
+// initCapture to recreate the entire pipeline from scratch. This matters for
+// real recovery: the macOS post-sleep failure can wedge the AudioContext itself
+// (it keeps delivering zeros even with a fresh stream), so a partial rebuild
+// that reuses the context isn't enough — the evidence showed a still-silent hold
+// after a partial rebuild. Used on mic-loss, device change, and system wake.
+function teardownCapture(full = false) {
   try { if (processorNode) processorNode.port.onmessage = null; } catch {}
   try { sourceNode && sourceNode.disconnect(); } catch {}
   try { processorNode && processorNode.disconnect(); } catch {}
@@ -356,6 +365,11 @@ function teardownCapture() {
   prerollChunks = [];
   prerollBytes = 0;
   captureReady = false;
+  if (full && audioContext) {
+    try { audioContext.close(); } catch {}
+    audioContext = null;
+    workletLoaded = false;
+  }
 }
 
 // The mic died or was taken (track ended/muted, or a run of silent holds).
@@ -364,7 +378,7 @@ function teardownCapture() {
 function handleMicLost(reason) {
   log("Mic lost: " + reason);
   isRecording = false;
-  teardownCapture();
+  teardownCapture(true); // full rebuild — a partial one can keep a wedged context
   silentStreak = 0;
   clearFailureTimer();
   setStatus("Mic lost");
@@ -374,6 +388,43 @@ function handleMicLost(reason) {
   }
   socket = null;
   window.dictationBridge.sendMicWarning(reason);
+}
+
+// Proactively rebuild the whole capture pipeline. Driven by main on system wake
+// (powerMonitor resume / unlock), the moment the mic is most likely to have gone
+// dead — so the FIRST dictation after sleep works instead of being the silent
+// one that trips the recovery. A no-op rebuild mid-hold would abandon the user's
+// audio, so if a hold is in progress we just mark it stale and let the next
+// press rebuild.
+// A wake from sleep usually fires BOTH powerMonitor resume and unlock-screen
+// back-to-back, so this can be called twice in the same tick. Coalesce them:
+// two overlapping rebuilds would race the AudioContext close/recreate and could
+// leak a stream or leave a half-built (silent) graph — the very wedge we're
+// fixing. One in-flight rebuild is shared by concurrent callers.
+let rebuildInFlight = null;
+async function rebuildCapture(reason) {
+  if (isRecording) {
+    captureStale = true;
+    log("Rebuild requested mid-hold (" + (reason || "") + ") — deferring to next press");
+    return;
+  }
+  if (rebuildInFlight) return rebuildInFlight;
+  rebuildInFlight = (async () => {
+    log("Rebuilding capture proactively (" + (reason || "wake") + ")");
+    teardownCapture(true);
+    silentStreak = 0;
+    captureStale = false;
+    try {
+      await initCapture();
+      if (audioContext && audioContext.state === "suspended") await audioContext.resume();
+      log("Capture rebuilt after " + (reason || "wake"));
+    } catch (error) {
+      // Leave it torn down; the next press's initCapture will try again.
+      captureReady = false;
+      log("Proactive rebuild failed: " + (error && error.message));
+    }
+  })();
+  try { await rebuildInFlight; } finally { rebuildInFlight = null; }
 }
 
 async function startRecording(profile) {
@@ -411,7 +462,7 @@ async function startRecording(profile) {
   // A device change since the last press means our warm stream is bound to the
   // wrong (old) device — drop it so initCapture re-acquires the new default.
   if (captureStale) {
-    teardownCapture();
+    teardownCapture(true);
     captureStale = false;
   }
 
@@ -465,22 +516,27 @@ function stopRecording() {
   setStatus("Finalizing…");
   log("Mic stopped, committing buffer");
 
-  // Dead-mic backstop: only judge holds long enough to be a real attempt (a tap
-  // is a misfire, not a silent mic). A live mic clears SILENCE_PEAK within the
-  // hold; a sustained sub-threshold peak means no audio arrived. A single such
-  // hold is legitimate (held the key, said nothing) — but a run of them is the
-  // mic, not the user, so warn and rebuild on the next press.
-  if (recordedBytes >= MIN_FAILURE_BYTES) {
-    if (utterancePeak < SILENCE_PEAK) {
-      silentStreak += 1;
-      log("Silent hold " + silentStreak + "/" + SILENT_STREAK_LIMIT + " (peak=" + utterancePeak.toFixed(4) + ")");
-      if (silentStreak >= SILENT_STREAK_LIMIT) {
-        handleMicLost("No sound is reaching the app — your mic may be muted or in use by another app.");
-        return;
-      }
-    } else {
-      silentStreak = 0;
-    }
+  // Dead-mic backstop (shared, unit-tested logic in /mic-health.js). A hold
+  // whose loudest frame is EXACTLY 0 is digital silence — a dead pipeline, never
+  // a quiet room — so rebuild immediately. A low-but-nonzero peak is ambiguous
+  // (held the key and said nothing, or a distant mic), so only a run of those
+  // counts as the mic being dead. Too-short holds (taps) aren't judged.
+  const verdict = classifyHold({
+    bytes: recordedBytes,
+    peak: utterancePeak,
+    minBytes: MIN_FAILURE_BYTES,
+    silencePeak: SILENCE_PEAK,
+    silentStreak,
+    streakLimit: SILENT_STREAK_LIMIT
+  });
+  silentStreak = verdict.silentStreak;
+  if (verdict.action === "silent") {
+    log("Silent hold " + silentStreak + "/" + SILENT_STREAK_LIMIT + " (peak=" + utterancePeak.toFixed(4) + ")");
+  }
+  if (verdict.action === "dead") {
+    log("Dead mic (peak=" + utterancePeak.toFixed(4) + ", bytes=" + recordedBytes + ") — rebuilding capture");
+    handleMicLost("No audio reached the app — the mic was restarted. Press and try again.");
+    return;
   }
 
   // Leave the capture pipeline warm for the next press — only stop streaming.
@@ -518,6 +574,7 @@ function stopRecording() {
 
 window.dictationBridge.onStart((profile) => startRecording(profile));
 window.dictationBridge.onStop(() => stopRecording());
+window.dictationBridge.onRebuildCapture((reason) => rebuildCapture(reason));
 
 function arrayBufferToBase64(buffer) {
   return u8ToBase64(new Uint8Array(buffer));

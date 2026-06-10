@@ -10,15 +10,42 @@
 // and PATH, so for that case everything here is a harmless no-op.
 import dotenv from "dotenv";
 import { app } from "electron";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, copyFileSync } from "node:fs";
 import { join } from "node:path";
+
+// This module is imported before main.js calls app.setName, so set the name here
+// too (idempotent). Without it, app.getPath("userData") below would resolve to
+// Electron's default ".../Application Support/Electron" folder, and the packaged
+// app would read its config from the wrong place.
+app.setName("GVoice");
+
+// The dev repo this build was historically pinned to. Kept ONLY to migrate an
+// existing install's config (and find a model the user already downloaded) the
+// first time this self-contained build runs — never as the live home.
+const LEGACY_HOME = "/Users/macmini/dev/voice";
 
 // Where the app's config (.env) and the Whisper model live. Kept OUTSIDE the
 // app bundle so real API keys never ship inside a distributable .app. Unpackaged
-// this is just the repo (cwd); packaged it's the install location, overridable
-// with GVOICE_HOME.
-const PACKAGED_HOME = "/Users/macmini/dev/voice";
-const HOME = process.env.GVOICE_HOME || (app.isPackaged ? PACKAGED_HOME : process.cwd());
+// this is the repo (cwd). Packaged it now defaults to userData — a writable,
+// install-independent location — so renaming, moving, or cleaning up the dev
+// repo no longer silently breaks the installed app. GVOICE_HOME still overrides.
+const USERDATA_HOME = app.getPath("userData");
+const HOME = process.env.GVOICE_HOME || (app.isPackaged ? USERDATA_HOME : process.cwd());
+
+// First packaged boot into the new home with no .env yet: migrate the one from
+// the old dev-repo location if it's there, so an existing install keeps working
+// without the user re-entering their keys. One-time copy — afterwards HOME/.env
+// is the single source of truth and the dev repo can be moved or deleted.
+if (app.isPackaged && HOME === USERDATA_HOME) {
+  const homeEnv = join(HOME, ".env");
+  const legacyEnv = join(LEGACY_HOME, ".env");
+  if (!existsSync(homeEnv) && existsSync(legacyEnv)) {
+    try {
+      mkdirSync(HOME, { recursive: true });
+      copyFileSync(legacyEnv, homeEnv);
+    } catch {}
+  }
+}
 
 // Finder launches with a minimal PATH. Prepend the dirs the app shells out to
 // (Homebrew for whisper-server / whisper-cli) so local Whisper works.
@@ -38,9 +65,19 @@ else dotenv.config();
 // .env this loaded — never a cwd-relative guess that misses in a packaged launch.
 export const ENV_FILE = envFile;
 
-// Default the Whisper model to an absolute path under HOME if the user hasn't
-// pinned one — a cwd-relative "./models/…" would miss in a packaged launch.
+// Default the Whisper model to an absolute path if the user hasn't pinned one.
+// Look in the new home first, then the legacy repo — so an existing install that
+// kept the model in the dev repo still finds it, while a fresh install can drop
+// the model into userData/models. If neither exists, WHISPER_MODEL stays unset
+// and main.js's onboarding surfaces "point GVoice at a model" instead of failing
+// per-dictation. A cwd-relative "./models/…" would miss in a packaged launch.
 if (!process.env.WHISPER_MODEL) {
-  const model = join(HOME, "models", "ggml-small.en-q5_1.bin");
-  if (existsSync(model)) process.env.WHISPER_MODEL = model;
+  const MODEL_NAME = "ggml-small.en-q5_1.bin";
+  for (const base of [HOME, LEGACY_HOME]) {
+    const model = join(base, "models", MODEL_NAME);
+    if (existsSync(model)) {
+      process.env.WHISPER_MODEL = model;
+      break;
+    }
+  }
 }

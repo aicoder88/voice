@@ -3,7 +3,7 @@
 // reads process.env (see src/bootstrap-env.js). Replaces the old
 // `import "dotenv/config"`, which only worked when launched from the repo dir.
 import "./src/bootstrap-env.js";
-import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification, clipboard } from "electron";
+import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification, clipboard, powerMonitor } from "electron";
 
 // Brand the app as "GVoice" even when run unpackaged (otherwise the menu bar,
 // About panel, and userData folder all read "Electron"). Must run before the
@@ -26,11 +26,17 @@ app.on("second-instance", () => {
 });
 
 process.on("uncaughtException", (err) => {
-  console.error("[uncaughtException]", err && err.stack ? err.stack : err);
+  const stack = err && err.stack ? err.stack : String(err);
+  console.error("[uncaughtException]", stack);
+  // dlog is a hoisted function declaration, so it's reachable here even though
+  // it's defined further down. Capture the crash in the file too (console alone
+  // is invisible in a packaged launch).
+  try { dlog("uncaughtException", stack); } catch {}
 });
 process.on("unhandledRejection", (reason) => {
-  const stack = reason && typeof reason === "object" && "stack" in reason ? reason.stack : reason;
+  const stack = reason && typeof reason === "object" && "stack" in reason ? reason.stack : String(reason);
   console.error("[unhandledRejection]", stack);
+  try { dlog("unhandledRejection", String(stack)); } catch {}
 });
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
@@ -44,7 +50,7 @@ import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-
 import { ENV_FILE } from "./src/bootstrap-env.js";
 import { writeEnvFile, settingsView, patchFromView } from "./src/settings.js";
 import { saveRecording, pruneRecordings, clearRecordings } from "./src/recordings.js";
-import { appendFileSync, statSync, renameSync, unlinkSync, existsSync } from "node:fs";
+import { appendFileSync, statSync, renameSync, unlinkSync, existsSync, mkdirSync } from "node:fs";
 import { mkdir as mkdirAsync } from "node:fs/promises";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -82,8 +88,14 @@ let hotkeyEngine = null;
 let isQuitting = false;
 const dictation = new DictationSession();
 
-const DEBUG_LOG = join(__dirname, "debug.log");
-const DEBUG_LOG_ROTATED = join(__dirname, "debug.log.1");
+// The diagnostic log MUST live in userData, not next to main.js. When the app
+// is packaged, __dirname is inside the read-only .app/.asar bundle, so the old
+// join(__dirname, "debug.log") made every appendFileSync throw — silently, since
+// dlog swallows errors — and the INSTALLED app logged nothing at all (that's why
+// a real incident was a forensic dig). userData is writable in every launch.
+// app.getPath("userData") is valid here because app.setName ran at the top.
+const DEBUG_LOG = join(app.getPath("userData"), "debug.log");
+const DEBUG_LOG_ROTATED = join(app.getPath("userData"), "debug.log.1");
 const DEBUG_LOG_MAX_BYTES = 1024 * 1024; // ~1 MB
 /** @type {number} bytes appended to debug.log since boot; seeded from disk on first write */
 let dlogBytesWritten = -1;
@@ -92,8 +104,10 @@ function dlog(/** @type {string} */ tag, /** @type {unknown} */ data) {
     const line = `[${new Date().toISOString()}] ${tag} ${typeof data === "string" ? data : JSON.stringify(data)}\n`;
     const lineBytes = Buffer.byteLength(line, "utf8");
     // Seed the byte counter once with the file's current size so we account
-    // for content carried over from previous runs.
+    // for content carried over from previous runs. Ensure the userData dir
+    // exists first — early boot lines can land before it's otherwise created.
     if (dlogBytesWritten < 0) {
+      try { mkdirSync(dirname(DEBUG_LOG), { recursive: true }); } catch {}
       try { dlogBytesWritten = statSync(DEBUG_LOG).size; }
       catch { dlogBytesWritten = 0; }
     }
@@ -105,6 +119,31 @@ function dlog(/** @type {string} */ tag, /** @type {unknown} */ data) {
     appendFileSync(DEBUG_LOG, line);
     dlogBytesWritten += lineBytes;
   } catch {}
+}
+
+// In a packaged launch there's no terminal, so every console.error — the relay
+// diagnostics, provider warnings ("deepgram ALL EMPTY"), the whisper silence
+// gate, typing failures — would vanish. Mirror them into debug.log so the
+// installed app's failures are diagnosable in one file. Dev launches keep the
+// console untouched (the terminal already shows everything).
+if (app.isPackaged) {
+  const consoleError = console.error.bind(console);
+  console.error = (/** @type {any[]} */ ...args) => {
+    consoleError(...args);
+    try {
+      const msg = args
+        .map((a) => {
+          if (typeof a === "string") return a;
+          if (a && a.stack) return a.stack;
+          // A rich error object can carry a circular reference; JSON.stringify
+          // would throw and (caught below) silently drop the MOST interesting
+          // log line. Fall back to String() so it's never lost.
+          try { return JSON.stringify(a); } catch { return String(a); }
+        })
+        .join(" ");
+      dlog("console.error", msg);
+    } catch {}
+  };
 }
 
 /** @type {number | null} */
@@ -378,8 +417,8 @@ const PILL_BOTTOM_MARGIN = 28; // gap above the dock / taskbar
 const PILL_SIZES = {
   listening: { width: 200, height: 56 },
   transcribing: { width: 220, height: 56 },
-  success: { width: 440, height: 56 },
-  error: { width: 440, height: 56 }
+  success: { width: 480, height: 56 },
+  error: { width: 480, height: 56 }
 };
 
 // Pick the display the pill should appear on: the one holding the window the
@@ -418,7 +457,7 @@ function showPillForWindow(/** @type {number | null} */ _hwnd) {
 // applies to result states: { canCopy, canOpen }.
 function setPillState(
   /** @type {"listening" | "transcribing" | "success" | "error"} */ state,
-  /** @type {{ canCopy?: boolean, canOpen?: boolean, holdMs?: number }} */ opts = {}
+  /** @type {{ canCopy?: boolean, canOpen?: boolean, holdMs?: number, reason?: string }} */ opts = {}
 ) {
   if (!pillWindow || pillWindow.isDestroyed()) return;
   const size = PILL_SIZES[state] || PILL_SIZES.listening;
@@ -429,7 +468,10 @@ function setPillState(
     state,
     canCopy: !!opts.canCopy,
     canOpen: !!opts.canOpen,
-    holdMs: opts.holdMs
+    holdMs: opts.holdMs,
+    // A short, plain-English reason shown on result pills so a red "Error" isn't
+    // a mystery ("No audio reached the app — mic restarted, try again", etc.).
+    reason: opts.reason || ""
   });
 }
 
@@ -440,7 +482,7 @@ function showPillResult(
   /** @type {"success" | "error"} */ state,
   /** @type {string | null} */ transcript,
   /** @type {string | null} */ recordingPath,
-  /** @type {{ uncertain?: boolean }} */ opts = {}
+  /** @type {{ uncertain?: boolean, reason?: string }} */ opts = {}
 ) {
   currentTranscript = transcript;
   currentRecordingPath = recordingPath;
@@ -450,7 +492,7 @@ function showPillResult(
   // common case in browsers / Slack / editors), lingers 30s so the user has time
   // to read it and click Copy / Open if the paste actually missed.
   const holdMs = state === "error" || opts.uncertain ? 30000 : 6000;
-  setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath, holdMs });
+  setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath, holdMs, reason: opts.reason });
   pillWindow?.showInactive();
   // Crash backstop only — must outlive the renderer's own timer so it never
   // cuts the pill short. Normal completions clear it via hidePill() first.
@@ -697,6 +739,23 @@ function createDictationWindow() {
   });
   dictationWindow.webContents.on("console-message", (_e, level, message) => {
     console.error("[dictation/renderer]", message);
+  });
+  // The hidden renderer owns mic capture + the WebSocket. If it crashes, the
+  // hotkey would keep IPCing into a dead webContents and every press would
+  // silently do nothing until an app restart — the same "works until it doesn't"
+  // trap. Reload it so the next press has a live renderer, and capture the crash
+  // in the log (invisible on the console in a packaged launch).
+  dictationWindow.webContents.on("render-process-gone", (_e, details) => {
+    console.error("[dictation/renderer] process gone:", details && details.reason);
+    dlog("render-process-gone", details || {});
+    // Small delay so we don't tight-loop if it dies again on load.
+    setTimeout(() => {
+      try { if (dictationWindow && !dictationWindow.isDestroyed()) reloadDictationWindow(); } catch {}
+    }, 800);
+  });
+  dictationWindow.webContents.on("unresponsive", () => {
+    console.error("[dictation/renderer] unresponsive");
+    dlog("renderer-unresponsive", {});
   });
   const provider = encodeURIComponent((process.env.STT_PROVIDER || "openai").toLowerCase());
   dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html?provider=${provider}`);
@@ -963,7 +1022,7 @@ function setupIpc() {
     if (!text || !text.trim()) {
       if (chunks && chunks.length) {
         const failedPath = await saveTempRecording(chunks, sampleRate);
-        showPillResult("error", null, failedPath);
+        showPillResult("error", null, failedPath, { reason: "No speech detected — recording saved." });
         recordTranscript("", false, failedPath);
         rebuildTrayMenu();
       } else {
@@ -995,7 +1054,12 @@ function setupIpc() {
           result.pasted ? "success" : "error",
           result.text,
           recordingPath,
-          { uncertain: result.pasted && result.verified !== true }
+          {
+            uncertain: result.pasted && result.verified !== true,
+            // Only the hard-miss case gets an explanatory reason; a confirmed
+            // success keeps the plain "Success" label.
+            reason: result.pasted ? "" : "Couldn't paste it — click Copy to grab the text."
+          }
         );
         // Keep the last 50 dictations on disk and in the tray menu, so a
         // missed paste is recoverable — and listenable — even after the pill is
@@ -1016,7 +1080,7 @@ function setupIpc() {
       }
     } catch (error) {
       console.error("[main] Typing failed:", error.stack || error.message);
-      showPillResult("error", text, recordingPath);
+      showPillResult("error", text, recordingPath, { reason: "Something went wrong typing it out — click Copy." });
       // Cleanup never ran on this path — at least strip Whisper noise tokens
       // so the history entry matches the others as closely as possible.
       recordTranscript(stripWhisperNoiseTokens(text.trim()) || text, false, recordingPath);
@@ -1034,9 +1098,11 @@ function setupIpc() {
     const chunks = (payload && payload.chunks) || [];
     const recordingPath = await saveTempRecording(chunks, payload && payload.sampleRate);
     if (recordingPath) console.error("[main] dictation recording saved:", recordingPath);
-    // No transcript to copy; the recording is what we offer. Log it in the
-    // history too so the user can come back and listen via the tray.
-    showPillResult("error", null, recordingPath);
+    // The renderer sends a plain-English reason ("didn't respond in time", "lost
+    // the connection…"); show it on the pill. No transcript to copy; the
+    // recording is what we offer. Logged in history too for tray playback.
+    const reason = (payload && payload.reason) || "Couldn't transcribe — recording saved.";
+    showPillResult("error", null, recordingPath, { reason });
     if (recordingPath) {
       recordTranscript("", false, recordingPath);
       rebuildTrayMenu();
@@ -1046,8 +1112,10 @@ function setupIpc() {
   ipcMain.on("dictation:error", (_event, message) => {
     dictation.done();
     console.error("Dictation error:", message);
-    // No audio, no transcript — a bare Error pill (e.g. mic blocked, relay down).
-    showPillResult("error", null, null);
+    dlog("dictation-error", message);
+    // No audio, no transcript (mic blocked, relay down, offline). Show the
+    // reason on the pill so the user knows WHY, not just that it failed.
+    showPillResult("error", null, null, { reason: typeof message === "string" ? message : "" });
   });
 
   // Pill action buttons (success/error states only).
@@ -1139,9 +1207,13 @@ function setupIpc() {
   // app, or silent for several holds in a row) and rebuilt its capture. Make
   // the failure visible instead of silently typing nothing.
   ipcMain.on("dictation:mic-warning", (_event, message) => {
-    hidePill();
     dictation.done();
     console.error("[main] mic warning:", message);
+    dlog("mic-warning", message);
+    // Show the reason ON the pill (not just a system notification the user may
+    // have muted) so a dead-mic rebuild visibly says "press and try again"
+    // instead of a bare red dot. Keep the throttled notification as a backup.
+    showPillResult("error", null, null, { reason: message });
     showMicWarning(message);
   });
 }
@@ -1163,6 +1235,25 @@ function showMicWarning(/** @type {string} */ message) {
   }
   // Windows tray balloon as a secondary channel (no-op on macOS).
   try { tray?.displayBalloon?.({ title: "GVoice — check your microphone", content: message }); } catch {}
+}
+
+// Rebuild the mic pipeline proactively when the machine wakes. Sleep/wake (and
+// screen unlock) is exactly when the macOS capture stream goes dead and starts
+// delivering pure silence — so instead of waiting for the FIRST post-sleep
+// dictation to be the silent one that trips recovery, we tell the renderer to
+// rebuild the moment we wake. Wired once.
+let powerMonitorWired = false;
+function setupPowerMonitor() {
+  if (powerMonitorWired) return;
+  powerMonitorWired = true;
+  const rebuild = (/** @type {string} */ reason) => {
+    dlog("power", reason);
+    if (dictationWindow && !dictationWindow.isDestroyed()) {
+      dictationWindow.webContents.send("dictation:rebuild-capture", reason);
+    }
+  };
+  powerMonitor.on("resume", () => rebuild("resume"));
+  powerMonitor.on("unlock-screen", () => rebuild("unlock-screen"));
 }
 
 function createTray() {
@@ -1318,6 +1409,7 @@ async function bringUpDictation(onReady) {
   createPillWindow();
   createVocabWindow();
   createDictationWindow();
+  setupPowerMonitor();
   if (!dictationWindow) return;
   dictationWindow.webContents.once("did-finish-load", async () => {
     await setupHotkey();

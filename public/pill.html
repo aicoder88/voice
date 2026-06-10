@@ -43,7 +43,16 @@
         flex: none;
         background: #ff5a5a; /* listening default */
       }
-      .label { white-space: nowrap; }
+      /* One line; a reason longer than the pill is ellipsized rather than
+         clipping mid-word or shoving the action buttons off-window. The full
+         text is always in debug.log. Narrower when action buttons share the row. */
+      .label {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 380px;
+      }
+      body.has-actions .label { max-width: 210px; }
 
       /* --- Per-state dot colour + animation ------------------------------- */
       body[data-state="listening"]    .dot { background: #ff5a5a; animation: pulse 1s ease-in-out infinite; }
@@ -127,7 +136,12 @@
       function applyState(data) {
         const state = (data && data.state) || "listening";
         document.body.setAttribute("data-state", state);
-        labelEl.textContent = LABELS[state] || state;
+        // Show main's plain-English reason on result pills when it sent one, so a
+        // red dot isn't a bare "Error"; fall back to the generic state label.
+        const reason = data && typeof data.reason === "string" ? data.reason.trim() : "";
+        labelEl.textContent = (reason && (state === "success" || state === "error"))
+          ? reason
+          : (LABELS[state] || state);
 
         const isResult = state === "success" || state === "error";
         const showCopy = isResult && data && data.canCopy;

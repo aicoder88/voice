@@ -1,3 +1,74 @@
+# Session notes — 2026-06-09 (pt.2): "error until restart" — IMPLEMENTED + SHIPPED
+
+Implemented all 6 plan steps, reviewed, built, reinstalled, verified live.
+
+## Core fix (Step 1)
+- The dead-mic decision is one pure, unit-tested function: public/mic-health.js
+  classifyHold(). KEY insight: a loudest-frame of EXACTLY 0 is digital silence =
+  a dead pipeline (the recorded evidence was all-zero samples), never a real
+  room (which always has a noise floor > 0). So ONE zero-peak hold rebuilds
+  immediately; a low-but-nonzero peak still needs the 3-hold streak.
+- teardownCapture(full=true) now CLOSES the AudioContext (+ forgets the worklet),
+  so recovery rebuilds the WHOLE pipeline — the old partial rebuild reused a
+  wedged context and stayed silent (the evening's evidence).
+- Proactive rebuild on powerMonitor resume/unlock (system wake is when the macOS
+  stream dies). Renderer rebuildCapture() guarded against the resume+unlock
+  double-fire (re-entrancy promise) so two overlapping rebuilds can't race the
+  context close/recreate.
+- Renderer is now an ES module so it can import the shared mic-health module over
+  HTTP (server already serves public/*.js as text/javascript). Verified the
+  packaged renderer loads clean.
+
+## Review-gate decisions (adversarial + simplicity)
+ACCEPTED:
+- rebuildCapture re-entrancy guard — resume AND unlock-screen fire together on
+  wake; two concurrent async rebuilds could leak a stream / leave a half-built
+  silent graph. One in-flight rebuild shared by callers.
+- circular-safe stringify in the packaged console.error→dlog mirror — a rich
+  error object with a circular ref would throw in JSON.stringify and (caught)
+  silently drop the MOST useful log line. Falls back to String().
+REJECTED:
+- "wake message dropped during a provider/crash reload" — a freshly-loaded
+  renderer has NO warm AudioContext (capture is built lazily on first press), so
+  it's never in the dead state; the next press builds clean regardless.
+- worklet frame arriving between teardown and init — reviewer agreed harmless.
+- window.dictationBridge missing guard — pre-existing (old classic script threw
+  the same way); not worsened by the module conversion; out of scope.
+- four window.DICTATION_* tuning knobs / arrayBufferToBase64 wrapper /
+  HIDE_BY_STATE fallback — all pre-existing, not introduced here.
+
+## Verified
+- 61/61 unit tests (7 new). node --check clean on all touched files.
+- Built + signed (team JZ4Z22F6BM, same bundle id → mic/AX/input grants persist),
+  reinstalled /Applications/GVoice.app, relaunched.
+- LIVE: debug.log present in userData; console.error mirrored (whisper output in
+  it); legacy .env migrated to userData on first packaged boot; whisper warmed;
+  ES-module renderer loaded clean.
+- NOT verifiable here: a real sleep→wake→dictate cycle (needs physical sleep).
+  The wake hook is wired and any recurrence is now diagnosable from debug.log.
+- Parity 4/5 — the 1 fail is OpenAI live-model access, env-only, unrelated.
+
+---
+
+# Session notes — 2026-06-09: "always says error until restart" — diagnosed, plan written
+
+- ROOT CAUSE (evidence-confirmed): the hidden dictation renderer's mic capture
+  stream died mid-session and delivered pure digital silence — every failed
+  attempt's saved WAV (13:31, 23:26–23:27) has peak=0/rms=0, while the 09:50
+  success has peak=16900. With zero audio the whisper-local silence gate returns
+  an empty transcript → error pill on every attempt until app restart. App had
+  been running since Mon 10AM.
+- Existing auto-recovery didn't save it: needs 3 silent holds before acting, its
+  rebuild keeps the old AudioContext (insufficient — the post-recovery attempt
+  was still all-zero), and nothing rebuilds on system wake.
+- Found while investigating (also in plan): packaged app's debug.log path is
+  inside the read-only bundle → installed app logs NOTHING; bare "Error" pill
+  carries no reason; PACKAGED_HOME hardcodes /Users/macmini/dev/voice.
+- Action taken this session: restarted /Applications/GVoice.app (new PID) so
+  dictation works tonight. NO code changes yet — plan in .claude/plan.md awaits "ok".
+
+---
+
 # Session notes — 2026-06-08 (pt.3): eight improvements (settings UI, retry, privacy, tests, etc.)
 
 Implemented the 8-item improvement list. All additive; new logic pulled into pure,

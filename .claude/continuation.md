@@ -1,55 +1,40 @@
-# Continuation — eight improvements (2026-06-08 pt.3)
+# Continuation — GVoice "error until restart" fix
 
-Status: COMPLETE in source. `node --check` clean on all touched files;
-`pnpm test:unit` 54/54; `pnpm test:parity` 4 pass + 1 pre-existing network skip;
-`pnpm test:cleanup` 8/9 (the 1 "fail" is the documented honest groq-429 rate-limit
-fallback, not a regression). NOT committed and NOT rebuilt into
-/Applications/GVoice.app — the user runs the packaged app, so a `pnpm build` is
-needed to test live (or run via `pnpm start`).
+## State (2026-06-09) — DONE + SHIPPED
+All 6 plan steps implemented, reviewed, built, reinstalled to /Applications,
+relaunched, and verified (see plan.md "IMPLEMENTED + SHIPPED"). Nothing pending
+except watching for a real-world sleep→wake recurrence (now diagnosable via the
+userData debug.log).
 
-## What shipped (the 8-item list, all uncommitted)
-1. Settings window — src/settings.js (pure .env writer), public/settings.html,
-   preload-settings.cjs, IPC settings:get/save/clear-recordings in main.js.
-   Live-apply: realtime-relay.js reads keys fresh per connection;
-   reloadDictationWindow() on provider switch; first-run save boots relay +
-   bringUpDictation().
-2. Windows paste verify — foreground.isForegroundWindow(); processTranscript
-   downgrades pasted→false if focus left the restored window mid-paste (win32).
-3. Retry — src/retry.js, wired into cleanup.js + whisper-local runWhisperServer.
-   Streaming WS providers intentionally not retried (dup-transcript risk).
-4. Recordings privacy — src/recordings.js (count + age prune), RECORDINGS_ENABLED
-   + RECORDING_RETENTION_DAYS, boot prune, tray "Clear recordings", Settings UI.
-5. Tests — scripts/unit/{hotkey-logic,vocab,settings,recordings,retry}.test.js.
-   `pnpm test:unit`. Pure reducers extracted to src/hotkey-logic.js (shared by
-   both hotkey backends).
-6. Offline pre-flight — public/dictation.js: cloud provider + offline → helpful
-   error before connecting.
-7. Deepgram observability — emitCompleted(reason) logs per-leg detail + ALL-EMPTY.
-8. First-run onboarding — needsOnboarding() opens Settings when key/model missing.
+## What changed (files)
+- public/mic-health.js — NEW pure module classifyHold(): zero-peak ⇒ instant
+  dead-mic, low-but-nonzero ⇒ streak. Shared by renderer + unit test.
+- scripts/unit/mic-health.test.js — NEW, 7 tests.
+- public/dictation.js — now an ES module (`import` from /mic-health.js);
+  teardownCapture(full) closes the AudioContext for a true rebuild; stopRecording
+  uses classifyHold; rebuildCapture() proactive on wake (re-entrancy guarded);
+  onRebuildCapture wired.
+- public/dictation.html — script tag now type="module".
+- preload.cjs — onRebuildCapture bridge.
+- main.js — DEBUG_LOG → userData (+mkdir); console.error mirrored to dlog when
+  packaged (circular-safe); powerMonitor resume/unlock → dictation:rebuild-capture;
+  render-process-gone/unresponsive on dictationWindow → reload+dlog;
+  uncaught/unhandled → dlog; pill reason threaded through
+  showPillResult/setPillState; PILL error/success width 440→480.
+- public/pill.html — shows the reason string on result pills; label ellipsis.
+- src/bootstrap-env.js — packaged HOME defaults to userData (not the hardcoded
+  dev repo); migrates legacy .env once; resolves whisper model from HOME then
+  legacy. app.setName moved earlier so userData resolves to GVoice.
 
-## Files touched
-New: src/settings.js, src/recordings.js, src/retry.js, src/hotkey-logic.js,
-preload-settings.cjs, public/settings.html, scripts/unit/*.test.js.
-Modified: main.js, src/hotkey.js, src/foreground.js, src/cleanup.js,
-src/providers/whisper-local.js, src/providers/deepgram.js, realtime-relay.js,
-src/bootstrap-env.js (exports ENV_FILE), public/dictation.js, package.json,
-.env.example, README.md.
+## Known/deferred
+- Whisper MODEL file still lives in /Users/macmini/dev/voice/models and is found
+  via the legacy fallback (config .env is now decoupled into userData; the model
+  file is not copied — too heavy). If the repo is deleted, onboarding surfaces
+  "point GVoice at a model" instead of a silent failure.
+- Parity test 5 needs live OpenAI gpt-realtime-whisper access (account-gated),
+  unrelated to this work.
 
-## To verify in the real app (after pnpm build)
-- Rename/clear .env key → relaunch → Settings opens on first run; paste a key,
-  Save → dictation works WITHOUT restart.
-- Tray → Settings… → switch engine → next dictation uses it.
-- Settings → "Delete all recordings now" and the retention-days field; tray
-  "Clear recordings".
-- (Windows) paste while another app steals focus → Error pill, text on clipboard.
-
-## Known follow-ups (surfaced by review, deliberately deferred)
-- whisper PID file is a single fixed tmp path → two GVoice instances could kill
-  each other's whisper-server. PRE-EXISTING (not from this pass). Fix = per-PID or
-  per-userData pidfile if it ever bites.
-- reloadDictationWindow vs a rapid first-run double-save: theoretical double
-  loadURL race. Not worth a mutex unless seen in practice.
-
-## Next step options
-- "ok" → rebuild (`pnpm build`, mac dir target) + reinstall /Applications/GVoice.app.
-- "commit" / "push" → stage + commit the working tree.
+## Next step
+None required. If a sleep→wake silent-mic error ever recurs, read
+~/Library/Application Support/GVoice/debug.log — look for "power resume",
+"Dead mic", "render-process-gone".
