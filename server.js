@@ -76,10 +76,13 @@ export function startServer({ port = Number(process.env.PORT || 3000), model = p
         return;
       }
       console.warn(`Port ${port} is busy, so a free port will be used instead.`);
-      server.listen(0);
+      server.listen(0, "127.0.0.1");
     });
 
-    server.listen(port, () => {
+    // Loopback only: the relay serves saved voice recordings and spends the
+    // API keys, so it must never be reachable from the LAN. (whisper-server
+    // already binds 127.0.0.1; this keeps the relay consistent with it.)
+    server.listen(port, "127.0.0.1", () => {
       const address = server.address();
       const activePort = typeof address === "object" && address ? address.port : port;
 

@@ -75,4 +75,4 @@ Everything (including the knobs not in the window — models, ports, the diction
 
 ## Troubleshooting & logs
 
-Per-event tracing (key presses, paste timing, cleanup) is written to `debug.log`. Set `GVOICE_DEBUG=1` to also echo those traces to the console while developing.
+Per-event tracing (key presses, paste timing, cleanup) is written to `debug.log` in the app's data folder — on macOS that's `~/Library/Application Support/GVoice/debug.log` (rotated at ~1 MB). Set `GVOICE_DEBUG=1` to also echo those traces to the console while developing.

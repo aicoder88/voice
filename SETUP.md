@@ -65,7 +65,7 @@ An Electron window opens with status info. A tray icon shows up in the system tr
 | `TYPE_VIA_CLIPBOARD` | `true` | Paste vs simulated keystrokes. Paste is faster and more reliable. |
 | `PORT` | `3000` | Local relay port. |
 | `GVOICE_CORRECTION_WATCH_MS` | `12000` | How long after a dictation GVoice watches for a hand-typed correction (macOS/Linux). Set to `0` to turn manual-edit suggestions off. |
-| `GVOICE_DEBUG` | *(off)* | Set to `1` to echo per-event traces (presses, paste timing, cleanup) to the console. They're always written to `debug.log` regardless. |
+| `GVOICE_DEBUG` | *(off)* | Set to `1` to echo per-event traces (presses, paste timing, cleanup) to the console. They're always written to the app-data `debug.log` regardless (macOS: `~/Library/Application Support/GVoice/debug.log`). |
 
 ## Custom dictionary
 
@@ -128,7 +128,6 @@ main.js -> cleanup.js (LLM polish) -> typing.js (clipboard paste) -> focused app
 - `src/hotkey.js` - global right-Alt listener (uiohook-napi)
 - `src/typing.js` - keystroke / clipboard-paste output (nut-js)
 - `src/cleanup.js` - LLM polish pass (OpenAI chat completions)
-- `public/setup.html` - main window UI
 - `public/pill.html` - floating "Listening..." indicator
 - `public/dictation.html` + `dictation.js` - hidden mic + WS client
 - `docs/plan.md` - full delivery plan and progress notes

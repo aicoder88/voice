@@ -24,8 +24,8 @@ const defaultInstructions =
  * @property {string} [path]              WebSocket path (default "/realtime").
  * @property {string} [instructions]      System instructions for conversational mode.
  * @property {string} [deepgramApiKey]    Deepgram API key. Defaults to DEEPGRAM_API_KEY env.
- * @property {string} [deepgramModel]    Deepgram model id (default "nova-2").
- * @property {string} [deepgramLanguage] Deepgram BCP-47 language code (default "hr").
+ * @property {string} [deepgramModel]    Deepgram model id (default "nova-3").
+ * @property {string} [deepgramLanguage] Deepgram BCP-47 language code (default: read WHISPER_LANGUAGE from env per connection).
  * @property {string} [whisperBin]        Path to whisper-cli binary (default "whisper-cli").
  * @property {string} [whisperModel]      Path to whisper.cpp model file.
  * @property {string} [defaultProvider]   STT provider when ?provider= is absent ("openai" | "deepgram" | "whisper-local").

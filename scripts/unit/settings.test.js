@@ -89,7 +89,9 @@ test("settingsView: defaults when env is empty", () => {
   const v = settingsView({});
   assert.equal(v.provider, "openai");
   assert.equal(v.language, "auto");
-  assert.equal(v.cleanupEnabled, false);
+  // Mirrors main.js's runtime check (cleanup runs unless explicitly "false") —
+  // the view must agree or Save would silently flip cleanup off on fresh installs.
+  assert.equal(v.cleanupEnabled, true);
   assert.equal(v.recordingsEnabled, true);
   assert.equal(v.retentionDays, 7);
 });

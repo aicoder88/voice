@@ -1,101 +1,54 @@
-# GVoice reliability plan — "it says error until I restart it"
+# GVoice polish pass — 2026-06-10
 
-Diagnosed 2026-06-09. Impact-ordered. Status: ☐ pending / ☑ done
+Solo review (the 8-agent workflow hit the session limit; reviewed inline).
+Baseline: 97/97 unit, 4/5 parity (1 clean network skip). Impact-ordered.
 
-## ✅ IMPLEMENTED + SHIPPED 2026-06-09 (all 6 steps)
-Built, signed (team JZ4Z22F6BM, bundle com.purr.gvoice — TCC grants persist),
-reinstalled to /Applications/GVoice.app, relaunched. Verified live:
-- debug.log now writes to ~/Library/Application Support/GVoice/debug.log (Step 2).
-- console.error mirrored into that log (whisper-server output is captured) (Step 2).
-- legacy .env auto-migrated into userData on first packaged boot (Step 4).
-- ES-module renderer loaded clean in the packaged app ("Dictation worker loaded"
-  = the whole module incl. the /mic-health.js import executed) (Step 1).
-- 61/61 unit tests (7 new mic-health). Parity 4/5 — the 1 fail is OpenAI live
-  model access ("gpt-realtime-whisper-api-ev3 … no access"), env-only, unrelated.
-Review gate run (adversarial+simplicity): ACCEPTED a re-entrancy guard on
-rebuildCapture (resume+unlock double-fire) and a circular-safe stringify in the
-console.error mirror. Rejected the rest (pre-existing or non-issues) — see notes.md.
-Cannot verify the real sleep→wake→dictate path here (needs a physical sleep), but
-the wake hook is wired and any recurrence is now diagnosable from debug.log.
+## 1. Fix the uncommitted transcribeHrEn race (auto-language correctness)  ☑ done
+File: src/providers/whisper-local.js (uncommitted diff in working tree)
+- BUG in the WIP change: "first clean leg wins" defeats the function's purpose.
+  whisper-server serializes inference (one model context), and the EN leg is
+  POSTed first → EN nearly always finishes first. A forced-EN decode of
+  Croatian speech is garbled-but-real-looking text that PASSES the sanitizer,
+  so in auto mode Croatian would get typed as English garble almost every time.
+  The old confidence comparison was the only thing picking the right language.
+- Also: one leg erroring rejects the whole promise even when the other leg
+  has a good result (both old and new code) → falls back to slow CLI re-run.
+- Fix: Promise.allSettled both legs; pick via a NEW exported pure function
+  pickTranscript(en, hr) (sanitizer-survivor first, then confidence; a failed
+  leg loses to a successful one; both failed → throw so CLI fallback runs).
+- Unit tests for pickTranscript in scripts/unit (no server needed).
 
-## Root cause (confirmed with evidence)
+## 2. Bind the local relay to loopback only (privacy)  ☑ done
+File: server.js
+- BUG: server.listen(port) / listen(0) bind 0.0.0.0 — anyone on the same
+  Wi-Fi can reach the static server, /recordings/<name>.wav voice clips, and
+  the WS relay that spends the API keys. whisper-server already binds
+  127.0.0.1; the relay should too.
+- Fix: listen(port, "127.0.0.1") in both call sites.
 
-Every failed dictation today (13:31, 23:26:54, 23:27:00, 23:27:05, 23:27:55) saved a
-recording that is **pure digital silence — every sample exactly 0**. The 09:50 success
-has normal audio (peak 16900). The app has been running since Mon 10AM.
+## 3. Settings window's cleanup default disagrees with the app (silent flip)  ☑ done
+Files: src/settings.js, scripts/unit/settings.test.js
+- BUG: main.js runs cleanup unless CLEANUP_ENABLED==="false" (default ON);
+  settingsView reports OFF when unset. On a fresh install, opening Settings
+  and pressing Save writes CLEANUP_ENABLED=false — silently disabling the
+  AI tidy-up that was running. (Current machine sets it explicitly, so it
+  doesn't bite here — it bites fresh installs.)
+- Fix: settingsView default true; update the test that pinned the wrong value.
 
-The microphone capture stream inside the hidden dictation renderer went dead
-(classic macOS/Electron failure after sleep/wake or an audio-device change: the
-stream stays "live" but delivers zeros). With zero audio, the whisper-local
-silence gate (and Deepgram alike) returns an empty transcript → error pill,
-forever, until an app restart recreates the capture.
+## 4. Dead file + stale docs  ☑ done
+- Delete public/setup.html — the "main window" of the app's first iteration;
+  nothing loads it (verified: no references in any js/html).
+- SETUP.md + docs/ARCHITECTURE.md: remove/replace the setup.html rows.
+- README.md Troubleshooting: debug.log lives in the app-data folder when the
+  installed app runs (moved 2026-06-09); README still says repo-root only.
+- realtime-relay.js JSDoc: deepgramModel default says "nova-2" (code: nova-3);
+  deepgramLanguage default says "hr" (code: null = read env per connection).
+- pill.html comment: "Backstopped by main's safety timer (12s/45s)" — actual
+  is holdMs+15s (21s/45s).
 
-The existing auto-recovery (public/dictation.js) failed because:
-1. It needs **3 consecutive silent holds** before acting (SILENT_STREAK_LIMIT=3).
-2. Its rebuild keeps the old `AudioContext` (`teardownCapture()` only drops the
-   stream/nodes) — tonight's last attempt, after recovery should have fired, was
-   still all-zero, so reusing the context is not a sufficient rebuild.
-3. Nothing rebuilds proactively on system wake.
-
-## Step 1 — Fix dead-mic recovery for real (the bug)  ☐
-
-File: public/dictation.js (+ main.js for powerMonitor IPC)
-- Full rebuild: on recovery, also `audioContext.close()`, null it, reset
-  `workletLoaded`, recreate everything. (Current rebuild reuses the wedged context.)
-- Instant detection: a hold ≥ ~0.5s whose worklet peak is EXACTLY 0 is digital
-  silence — a dead pipeline, never a quiet room (real mics have a noise floor).
-  Rebuild immediately after ONE such hold (keep streak=3 for low-but-nonzero peaks).
-- Proactive: main listens to `powerMonitor` resume/unlock → IPC the renderer to
-  tear down + fully rebuild capture, so the FIRST post-sleep dictation works.
-  Same full rebuild on `devicechange` (today it only marks stale → partial rebuild).
-- Pill feedback when it happens: "Mic restarted — please try again" instead of bare error.
-
-## Step 2 — Make the installed app actually log  ☐
-
-File: main.js
-- BUG: `DEBUG_LOG = join(__dirname, "debug.log")` is inside the read-only app
-  package when installed → `appendFileSync` throws → swallowed → **the installed
-  app logs nothing** (that's why tonight was a mystery). Move to
-  `app.getPath("userData")/debug.log`.
-- Mirror `console.error` (relay + provider logs, e.g. "deepgram ALL EMPTY",
-  whisper silence gate) into the same rotated file when packaged — today all
-  relay diagnostics are lost in the installed app.
-- dlog the new mic lifecycle events: silent-hold, zero-peak rebuild, devicechange,
-  power resume, render-process-gone.
-
-## Step 3 — Error pill says WHY  ☐
-
-Files: main.js, public/pill.html, preload-pill.cjs
-- Thread a short reason string into showPillResult / pill renderer:
-  "No audio reached the app — mic restarted, try again", "Couldn't reach the
-  transcriber", etc. A bare red "Error" caused today's confusion.
-
-## Step 4 — Remove the dev-folder dependency of the installed app  ☐
-
-File: src/bootstrap-env.js (+ models/vocab resolution in whisper-local.js)
-- BUG (potential): `PACKAGED_HOME = "/Users/macmini/dev/voice"` is hardcoded.
-  The installed app reads .env, the Whisper model, and models/vocab.txt from the
-  dev repo. Renaming/moving/cleaning the repo silently breaks the installed app.
-- Default HOME to userData when packaged; on first packaged boot, migrate/copy
-  .env + model path if present at the old location. Keep GVOICE_HOME override.
-- Boot-time check: if the whisper-server binary (Homebrew) or model file is
-  missing, surface it on the splash/settings ("Local engine missing: …") instead
-  of the per-dictation ENOENT seen in the dev log (2026-06-02 10:05).
-
-## Step 5 — Self-heal the other "until restart" failure modes  ☐
-
-File: main.js
-- Hidden dictation renderer crash: hotkey would IPC into a dead webContents and
-  every press would silently do nothing. Handle `render-process-gone` /
-  `unresponsive` on dictationWindow → reload + dlog.
-- Route uncaughtException/unhandledRejection into dlog (currently console-only,
-  invisible when packaged).
-
-## Step 6 — Verify  ☐
-
-- Unit test for the zero-peak instant-rebuild decision (extract as a pure
-  function like hotkey-logic).
-- Manual: dictate → sleep Mac ≥1 min → wake → dictate (must work first try).
-- Simulate dead stream (feed zeros) → next press rebuilds, pill explains.
-- `pnpm test:unit` + `pnpm test:parity`, then `pnpm build`, reinstall to
-  /Applications, confirm debug.log appears in ~/Library/Application Support/GVoice/.
+## 5. Verify  ☑ done
+- node --check on touched files; pnpm test:unit; pnpm test:parity.
+- Review gate (adversarial + simplicity) — subagents if the session limit
+  allows, otherwise honest self-review noted in notes.md.
+- Commit to main (NO push). Rebuild + reinstall /Applications/GVoice.app,
+  relaunch (established ship step for this app).

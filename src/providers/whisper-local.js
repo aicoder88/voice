@@ -578,29 +578,66 @@ function avgLogprob(segments) {
 }
 
 /**
+ * Pick the better of the two forced-language transcription legs. Pure logic,
+ * exported for unit tests. Either leg may be null (that request failed).
+ *
+ * Order of preference:
+ *  1. A leg that survives the hallucination sanitizer beats one that doesn't
+ *     (a junk "thanks for watching" leg loses to a real sentence).
+ *  2. Otherwise higher confidence (mean avg_logprob) wins. This is what picks
+ *     the right LANGUAGE: forcing the wrong language onto real speech yields
+ *     garbled-but-real-looking text that PASSES the sanitizer, so a
+ *     first-leg-back-wins shortcut would type Croatian speech as English
+ *     garble. Confidence is the only signal that separates them — both legs
+ *     must be waited for. (Tried and reverted: whisper-server serializes
+ *     inference, so the EN leg, posted first, nearly always finished first.)
+ *
+ * @param {{ text: string, confidence: number, language: string } | null} en
+ * @param {{ text: string, confidence: number, language: string } | null} hr
+ * @returns {{ text: string, confidence: number, language: string } | null}
+ */
+export function pickTranscript(en, hr) {
+  if (!en && !hr) return null;
+  if (!en) return hr;
+  if (!hr) return en;
+  const enClean = sanitizeTranscript(en.text);
+  const hrClean = sanitizeTranscript(hr.text);
+  if (enClean && !hrClean) return en;
+  if (hrClean && !enClean) return hr;
+  return en.confidence >= hr.confidence ? en : hr;
+}
+
+/**
  * Constrain whisper's language guess to ENGLISH or CROATIAN only: transcribe the
- * clip forced to each, then keep the better one. This makes a stray Turkish (or
- * any other-language) hallucination structurally impossible — neither leg can
- * produce it — and mirrors how the Deepgram provider runs parallel hr/en legs.
- * The pick prefers the leg that survives the hallucination sanitizer (so a junk
- * "thanks for watching" leg loses to a real one), then higher confidence.
+ * clip forced to each (in parallel), then keep the better one — see
+ * pickTranscript. This makes a stray Turkish (or any other-language)
+ * hallucination structurally impossible — neither leg can produce it — and
+ * mirrors how the Deepgram provider runs parallel hr/en legs.
+ *
+ * One leg failing (a dropped connection that survives the retry) doesn't kill
+ * the dictation: the surviving leg's transcript is used. Only when BOTH legs
+ * fail does this throw, letting the caller fall back to the CLI path.
  *
  * @param {string} url @param {Buffer} wav @param {string} prompt
  * @returns {Promise<string>}
  */
 async function transcribeHrEn(url, wav, prompt) {
-  const [en, hr] = await Promise.all([
+  const [enResult, hrResult] = await Promise.allSettled([
     runWhisperServer(url, wav, prompt, "en"),
     runWhisperServer(url, wav, prompt, "hr")
   ]);
-  const enClean = sanitizeTranscript(en.text);
-  const hrClean = sanitizeTranscript(hr.text);
-  // Prefer a leg whose text survives sanitization; if only one does, take it.
-  let pick;
-  if (enClean && !hrClean) pick = en;
-  else if (hrClean && !enClean) pick = hr;
-  else pick = en.confidence >= hr.confidence ? en : hr;
-  console.error(`[relay] whisper hr/en pick=${pick.language} (en:conf=${en.confidence.toFixed(2)} hr:conf=${hr.confidence.toFixed(2)})`);
+  const en = enResult.status === "fulfilled" ? enResult.value : null;
+  const hr = hrResult.status === "fulfilled" ? hrResult.value : null;
+  const pick = pickTranscript(en, hr);
+  if (!pick) {
+    throw enResult.status === "rejected" ? enResult.reason : new Error("both hr/en legs failed");
+  }
+  if (!en || !hr) {
+    const dead = !en ? enResult : hrResult;
+    const reason = dead.status === "rejected" && dead.reason ? dead.reason.message : "unknown";
+    console.error(`[relay] whisper hr/en one leg failed (${!en ? "en" : "hr"}: ${reason}), using the other`);
+  }
+  console.error(`[relay] whisper hr/en pick=${pick.language} (en:${en ? "conf=" + en.confidence.toFixed(2) : "failed"} hr:${hr ? "conf=" + hr.confidence.toFixed(2) : "failed"})`);
   return pick.text;
 }
 

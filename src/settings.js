@@ -119,7 +119,10 @@ export function settingsView(env = {}) {
   return {
     provider: VALID_PROVIDERS.has(provider) ? provider : "openai",
     language: VALID_LANGUAGES.has(language) ? language : "auto",
-    cleanupEnabled: asBool(env.CLEANUP_ENABLED, false),
+    // Default must mirror the runtime check in main.js (cleanup runs unless
+    // CLEANUP_ENABLED === "false"), or a fresh install's first Save would
+    // silently write =false and turn off the tidy-up that had been running.
+    cleanupEnabled: asBool(env.CLEANUP_ENABLED, true),
     openaiKey: env.OPENAI_API_KEY || "",
     deepgramKey: env.DEEPGRAM_API_KEY || "",
     recordingsEnabled: asBool(env.RECORDINGS_ENABLED, true),

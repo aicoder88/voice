@@ -65,7 +65,6 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 
 - **`index.html`** — Demo page that mounts the reusable web component.
 - **`realtime-voice-agent.js`** — `<realtime-voice-agent>` custom element. Self-contained shadow-DOM UI: agent personality selector, instructions textarea, mic capture, WebSocket lifecycle, PCM playback queue. Public attributes: `endpoint`, `agent`, `compact`, `instructions`, `autoconnect`.
-- **`setup.html`** — Main window of the Electron app. Status pill, "scratchpad" textarea for direct dictation, copy/clear buttons. Pure HTML + inline JS, no module imports.
 - **`pill.html`** — Frameless transparent always-on-top "Listening…" indicator shown near the cursor while the hotkey is held.
 - **`dictation.html` + `dictation.js`** — Hidden Electron renderer that captures the microphone, downsamples to 24 kHz PCM16, streams it to the relay over `/realtime?provider=...`, and forwards the final transcript to `main.js` over IPC.
 
@@ -79,7 +78,6 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 | Process            | Code                                              | Lifetime                       |
 | ------------------ | ------------------------------------------------- | ------------------------------ |
 | Main (Node)        | `main.js`, `server.js`, `realtime-relay.js`, `src/*` | App lifetime                   |
-| Setup window       | `public/setup.html`                               | App lifetime (hidden on close) |
 | Dictation renderer | `public/dictation.html` + `dictation.js`          | App lifetime (hidden)          |
 | Pill window        | `public/pill.html`                                | App lifetime (shown on press)  |
 | whisper.cpp server | `whisper-server` child process                    | Only when `STT_PROVIDER=whisper-local` |

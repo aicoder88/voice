@@ -123,7 +123,7 @@
       // so there's time to click Copy / Open. A clean success clears fairly
       // quickly (it worked, get out of the way); an error lingers a long time so
       // the user can read it, copy the text, or open the recording without it
-      // vanishing mid-reach. Backstopped by main's safety timer (12s/45s).
+      // vanishing mid-reach. Backstopped by main's safety timer (holdMs + 15s).
       const HIDE_BY_STATE = { success: 6000, error: 30000 };
       let currentHideMs = 30000;
       let hideTimer = null;
