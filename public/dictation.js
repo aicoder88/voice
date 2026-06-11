@@ -630,7 +630,17 @@ function finishUtterance() {
   }
   if (verdict.action === "dead") {
     log("Dead mic (peak=" + utterancePeak.toFixed(4) + ", bytes=" + recordedBytes + ") — rebuilding capture");
-    handleMicLost("Mic restarted — press and try again.");
+    // Pure digital zeros mean the captured device is itself delivering silence —
+    // almost always the system default input got pointed at a silent/virtual
+    // device (when a mic unplugs, macOS falls back to whatever's left, e.g. a VR
+    // or screen-share virtual mic). A capture rebuild can't fix a wrong default,
+    // so name the real fix instead of implying a retry will help. A low-but-
+    // nonzero streak is the other case (a genuine pipeline wedge) where the
+    // rebuild usually DOES recover — keep the plain retry wording there.
+    const reason = utterancePeak === 0
+      ? "No sound is reaching GVoice. Open System Settings → Sound → Input and pick your microphone, then press again."
+      : "Mic restarted — press and try again.";
+    handleMicLost(reason);
     return;
   }
 

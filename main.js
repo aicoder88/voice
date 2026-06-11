@@ -505,12 +505,16 @@ function showPillResult(
 ) {
   currentTranscript = transcript;
   currentRecordingPath = recordingPath;
-  // How long the pill lingers before the renderer auto-hides it. A confirmed
-  // success clears quickly (6s — it worked, get out of the way). An error, or a
-  // success we COULDN'T confirm landed (no readable field to verify against, the
-  // common case in browsers / Slack / editors), lingers 30s so the user has time
-  // to read it and click Copy / Open if the paste actually missed.
-  const holdMs = state === "error" || opts.uncertain ? 30000 : 6000;
+  // How long the pill lingers before the renderer auto-hides it.
+  //  - A genuine error (no speech, failed paste, transcribe failure) lingers 30s
+  //    so the text/recording stays recoverable from the pill.
+  //  - A confirmed-landed success clears fast (6s — it worked, get out of the way).
+  //  - The common macOS middle case — pasted, but no readable field to verify it
+  //    landed (browsers / Slack / editors) — used to also sit 30s, which felt as
+  //    sticky as a failure. It almost always DID land, and the text is still in
+  //    the tray's Recent dictations if it didn't, so give it a short-ish 10s. The
+  //    new ✕ on the pill lets the user clear any of these instantly.
+  const holdMs = state === "error" ? 30000 : opts.uncertain ? 10000 : 6000;
   setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath, holdMs, reason: opts.reason });
   pillWindow?.showInactive();
   // Crash backstop only — must outlive the renderer's own timer so it never

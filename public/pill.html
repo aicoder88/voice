@@ -90,6 +90,17 @@
       }
       .actions button:hover { background: rgba(255, 255, 255, 0.22); }
       .actions button:active { background: rgba(255, 255, 255, 0.3); }
+      /* Dismiss is a compact round ✕ — close on demand, set apart from the
+         text actions so it's never mistaken for Copy/Open. */
+      .actions button.dismiss {
+        padding: 0;
+        width: 22px;
+        height: 22px;
+        line-height: 22px;
+        font-size: 12px;
+        color: #c7d2dc;
+      }
+      .actions button.dismiss:hover { background: rgba(255, 90, 90, 0.32); color: #fff; }
       /* Divider between the label and the actions. Only shown when at least
          one action button is present (toggled via .has-actions in JS). */
       .sep {
@@ -116,6 +127,9 @@
       <div class="actions">
         <button id="copy" type="button">Copy</button>
         <button id="open" type="button">Open recording</button>
+        <!-- Always present on result pills so any pop-up can be dismissed on
+             demand, even a bare "No speech detected" with nothing to copy. -->
+        <button id="dismiss" class="dismiss" type="button" aria-label="Dismiss" title="Dismiss">✕</button>
       </div>
     </div>
 
@@ -129,6 +143,7 @@
       const labelEl = document.getElementById("label");
       const copyBtn = document.getElementById("copy");
       const openBtn = document.getElementById("open");
+      const dismissBtn = document.getElementById("dismiss");
 
       // Auto-hide for result states, paused while the pointer is over the pill
       // so there's time to click Copy / Open. A clean success clears fairly
@@ -159,8 +174,10 @@
         const showOpen = isResult && data && data.canOpen;
         copyBtn.style.display = showCopy ? "" : "none";
         openBtn.style.display = showOpen ? "" : "none";
+        // Dismiss rides on every result pill, even one with no Copy/Open.
+        dismissBtn.style.display = isResult ? "" : "none";
         copyBtn.textContent = "Copy";
-        document.body.classList.toggle("has-actions", !!(showCopy || showOpen));
+        document.body.classList.toggle("has-actions", isResult);
 
         // Main decides the lingering time per result (it knows whether the
         // paste was confirmed); fall back to the per-state defaults if it didn't.
@@ -189,6 +206,8 @@
         window.pillBridge.openRecording();
         lingerAfterAction();
       });
+      // Close the pop-up now, whatever state it's in.
+      dismissBtn.addEventListener("click", () => window.pillBridge.hide());
 
       // The window is click-through with forwarded mouse moves (see main.js);
       // track whether the pointer is over the VISIBLE pill and flip real
