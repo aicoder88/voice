@@ -47,7 +47,9 @@ const FAILURE_MS = Number(window.DICTATION_FAILURE_MS || 20000);
 // have been streamed yet — releasing mid-word would otherwise clip the final
 // word or two. On release we keep streaming for this long, THEN commit, so the
 // tail reaches the engine. Tunable via window.DICTATION_TAIL_MS.
-const TAIL_MS = Number(window.DICTATION_TAIL_MS || 250);
+// 250 still clipped the final word for speakers who release mid-word; 450
+// covers the worklet's buffered burst plus ~200ms of trailing speech.
+const TAIL_MS = Number(window.DICTATION_TAIL_MS || 450);
 let draining = false;
 let drainTimer = null;
 // Partial-transcript fallback armed by finishUtterance. Tracked so a new press
