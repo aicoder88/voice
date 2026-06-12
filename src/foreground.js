@@ -25,6 +25,8 @@ let GetForegroundWindow = null;
 let GetAsyncKeyState = null;
 /** @type {((hwnd: number, rect: Buffer) => number) | null} */
 let GetWindowRect = null;
+/** @type {((vk: number, scan: number, flags: number, extra: number) => void) | null} */
+let keybd_event = null;
 
 if (isWin) {
   try {
@@ -40,6 +42,12 @@ if (isWin) {
     GetAsyncKeyState = user32.func("__stdcall", "GetAsyncKeyState", "short", ["int"]);
     // RECT is 16 bytes: left, top, right, bottom (all int32).
     GetWindowRect = user32.func("__stdcall", "GetWindowRect", "int", ["intptr_t", "void *"]);
+    // Synthesize keystrokes for the paste shortcut. Mirrors what macOS does with
+    // osascript: send Ctrl+V natively instead of pulling in nut-js (whose jimp
+    // image stack is heavy and packaging-fragile — it does not survive the
+    // electron-builder + pnpm bundle, which broke every Windows paste). Signature:
+    // void keybd_event(BYTE bVk, BYTE bScan, DWORD dwFlags, ULONG_PTR dwExtraInfo).
+    keybd_event = user32.func("__stdcall", "keybd_event", "void", ["uint8", "uint8", "uint32", "uintptr_t"]);
   } catch (err) {
     console.error("[foreground] koffi load failed:", err && err.message);
   }
@@ -288,6 +296,32 @@ const VK_RCONTROL = 0xA3;
 // Ctrl+Shift from whichever hand the user prefers.
 const VK_CONTROL = 0x11;
 const VK_SHIFT = 0x10;
+// VK_V = 0x56; KEYEVENTF_KEYUP = 0x0002 (the down event has no flag).
+const VK_V = 0x56;
+const KEYEVENTF_KEYUP = 0x0002;
+
+/**
+ * Send the paste shortcut (Ctrl+V) to the foreground window via Win32
+ * keybd_event — the Windows counterpart to the macOS osascript paste. Down both
+ * keys, then up in reverse order. Synchronous and fast; no native image stack.
+ *
+ * @returns {boolean} true if the keystroke was dispatched, false if the native
+ *   call is unavailable (non-Windows, or koffi failed to load) — the caller
+ *   then falls back to nut-js.
+ */
+export function sendPasteShortcut() {
+  if (!keybd_event) return false;
+  try {
+    keybd_event(VK_CONTROL, 0, 0, 0);
+    keybd_event(VK_V, 0, 0, 0);
+    keybd_event(VK_V, 0, KEYEVENTF_KEYUP, 0);
+    keybd_event(VK_CONTROL, 0, KEYEVENTF_KEYUP, 0);
+    return true;
+  } catch (err) {
+    console.error("[foreground] sendPasteShortcut failed:", err && err.message);
+    return false;
+  }
+}
 
 function asyncKeyDown(/** @type {number} */ vk) {
   if (!GetAsyncKeyState) return false;

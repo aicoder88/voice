@@ -134,15 +134,26 @@ function dlog(/** @type {string} */ tag, /** @type {unknown} */ data) {
   } catch {}
 }
 
-// In a packaged launch there's no terminal, so every console.error — the relay
-// diagnostics, provider warnings ("deepgram ALL EMPTY"), the whisper silence
-// gate, typing failures — would vanish. Mirror them into debug.log so the
-// installed app's failures are diagnosable in one file. Dev launches keep the
-// console untouched (the terminal already shows everything).
+// Per-event tracing is noisy (a line per press/release/cleanup/paste, plus the
+// renderer and relay diagnostics). Keep the durable record in debug.log; only
+// echo to the console when GVOICE_DEBUG is set.
+const VERBOSE = process.env.GVOICE_DEBUG === "1" || process.env.GVOICE_DEBUG === "true";
+function debug(/** @type {any[]} */ ...args) {
+  if (VERBOSE) console.error(...args);
+}
+
+// In a packaged launch there's normally no terminal, so every console.error —
+// the relay diagnostics, provider warnings ("deepgram ALL EMPTY"), the whisper
+// silence gate, typing failures — would vanish. Mirror them into debug.log so
+// the installed app's failures are diagnosable in one file. We only ALSO echo
+// to the real console when GVOICE_DEBUG is set: a packaged app that happens to
+// inherit a console (e.g. launched from a parent shell) would otherwise flood
+// it with per-event traces. Dev launches (not packaged) keep the console
+// untouched — the terminal already shows everything.
 if (app.isPackaged) {
   const consoleError = console.error.bind(console);
   console.error = (/** @type {any[]} */ ...args) => {
-    consoleError(...args);
+    if (VERBOSE) consoleError(...args);
     try {
       const msg = args
         .map((a) => {
@@ -161,14 +172,6 @@ if (app.isPackaged) {
 
 /** @type {number | null} */
 let savedForegroundHwnd = null;
-
-// Per-event tracing is noisy (a line per press/release/cleanup/paste). Keep the
-// durable record in debug.log via dlog(); only echo these to the console when
-// GVOICE_DEBUG is set. Genuine errors stay on console.error unconditionally.
-const VERBOSE = process.env.GVOICE_DEBUG === "1" || process.env.GVOICE_DEBUG === "true";
-function debug(/** @type {any[]} */ ...args) {
-  if (VERBOSE) console.error(...args);
-}
 
 // --- Custom-dictionary suggestion state ---
 // Cursor pop-up size (fixed; the card height is set in CSS). One source so the
@@ -1700,8 +1703,10 @@ app.whenReady().then(async () => {
   // the relay and brings dictation up without a restart (see settings:save).
   if (onboard) openSettingsWindow({ firstRun: true, reason: onboard });
 
-  // Pay the nut-js import cost at startup (Windows uses it for every paste) so
-  // the FIRST dictation types out as fast as the rest, not 300ms slower.
+  // Prewarm the typing module at startup. In the default clipboard mode this
+  // returns immediately (paste is a native keybd_event — no nut-js), so it only
+  // pays the ~300ms nut-js import cost up front when the character-by-character
+  // typing path (TYPE_VIA_CLIPBOARD=false) is in use.
   if (process.platform === "win32") {
     import("./src/typing.js").then((m) => m.prewarmTyping()).catch(() => {});
   }

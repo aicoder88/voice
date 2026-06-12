@@ -1,6 +1,9 @@
 // @ts-check
 import { clipboard } from "electron";
 import { execFile } from "node:child_process";
+import { sendPasteShortcut } from "./foreground.js";
+
+const isWin = process.platform === "win32";
 
 const USE_CLIPBOARD = process.env.TYPE_VIA_CLIPBOARD !== "false";
 const RELEASE_DELAY_MS = Number(process.env.TYPE_RELEASE_DELAY_MS || 80);
@@ -20,11 +23,12 @@ function sleep(ms) {
 }
 
 // nut-js pulls in a large image stack (jimp) at import time, and is only needed
-// for the non-clipboard "type each character" path and for the paste keystroke
-// on non-macOS platforms. Load it lazily so the default macOS clipboard path
-// never touches it — that keeps a heavy, packaging-fragile dependency off the
-// hot path (a missing jimp sub-package once broke every dictation in the
-// packaged app).
+// for the non-clipboard "type each character" path. The paste keystroke uses a
+// native OS call on both macOS (osascript) and Windows (keybd_event, via
+// foreground.js), so neither touches nut-js. Load it lazily so the default
+// clipboard path never imports it — that keeps a heavy, packaging-fragile
+// dependency off the hot path (its jimp sub-packages do not survive the
+// electron-builder + pnpm bundle, which broke every Windows paste).
 /** @type {Promise<typeof import("@nut-tree-fork/nut-js")> | null} */
 let nutPromise = null;
 function nut() {
@@ -42,19 +46,32 @@ function nut() {
  * startup instead of on the user's FIRST paste, so the first dictation types
  * out as fast as every one after it. Fire-and-forget: the lazy path in
  * pasteShortcut() still covers it if this never ran or failed.
+ *
+ * Skipped entirely on the native-paste platforms (macOS, Windows) when in the
+ * default clipboard mode — there the paste keystroke never goes through nut-js,
+ * so importing the jimp stack would only waste startup time (and, in the
+ * packaged Windows app, log a harmless-but-noisy missing-module error).
  * @returns {Promise<void>}
  */
 export function prewarmTyping() {
+  const nativePaste = USE_CLIPBOARD && (process.platform === "darwin" || isWin);
+  if (nativePaste) return Promise.resolve();
   return nut().then(() => {}, () => {});
 }
 
 /**
  * Send the paste shortcut (⌘V / Ctrl+V) to the frontmost app. macOS uses the
- * built-in `osascript` (no native module; needs the Accessibility / Automation
- * permission the app already requires for typing). Other platforms use nut-js.
+ * built-in `osascript` and Windows a native `keybd_event` (both need only the
+ * Accessibility / input permission the app already requires for typing, and
+ * neither pulls in nut-js). Linux falls back to nut-js.
  * @returns {Promise<void>}
  */
 function pasteShortcut() {
+  if (isWin) {
+    // Native Win32 Ctrl+V. Returns false only if koffi never loaded, in which
+    // case we fall through to the nut-js path below as a last resort.
+    if (sendPasteShortcut()) return Promise.resolve();
+  }
   if (process.platform === "darwin") {
     return new Promise((resolve, reject) => {
       // Settle exactly once: on the child's exit, or on the timeout — whichever
