@@ -77,7 +77,7 @@ An Electron window opens with status info. A tray icon shows up in the system tr
 | `WHISPER_MODEL` | `./models/ggml-small.en-q5_1.bin` | Full path to a GGML model file. Set by the Windows setup script. |
 | `WHISPER_PORT` | *(free port each launch)* | Port the whisper-server child process listens on. Picked automatically; set this only to pin a fixed port. |
 | `CLEANUP_ENABLED` | `true` | LLM polish (punctuation, remove "um"/"uh"). |
-| `CLEANUP_PROVIDER` | `groq` if `GROQ_API_KEY` is set, else `openai` | Which API runs the cleanup pass: `groq`, `openai`, `anthropic`, or `google`. |
+| `CLEANUP_PROVIDER` | `groq` (ships a free-tier key, so cleanup works with no setup) | Which API runs the cleanup pass: `groq`, `openai`, `anthropic`, or `google`. |
 | `CLEANUP_MODEL` | *(per provider)* | Cleanup model. Defaults: `llama-3.3-70b-versatile` (groq), `gpt-4.1-mini` (openai), `claude-haiku-4-5` (anthropic), `gemini-2.5-flash-lite` (google). |
 | `TYPE_VIA_CLIPBOARD` | `true` | Paste vs simulated keystrokes. Paste is faster and more reliable. |
 | `PORT` | `3000` | Local relay port. |

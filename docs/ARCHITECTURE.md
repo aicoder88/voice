@@ -134,10 +134,10 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 | `WHISPER_SERVER_URL`      | (set by the provider once whisper-server is up) | relay   |
 | `WHISPER_SILENCE_PEAK`    | `500` (int16 peak; `0` disables the silence gate) | whisper-local provider |
 | `CLEANUP_ENABLED`         | `true`                           | main                   |
-| `CLEANUP_PROVIDER`        | implicit (groq if key, else openai) | cleanup             |
+| `CLEANUP_PROVIDER`        | `groq` (ships a free-tier key)   | cleanup                |
 | `CLEANUP_MODEL`           | provider-specific                | cleanup                |
 | `CLEANUP_TIMEOUT_MS`      | `6000`                           | cleanup                |
-| `GROQ_API_KEY`            | —                                | cleanup                |
+| `GROQ_API_KEY`            | baked-in fallback (set to override) | cleanup             |
 | `ANTHROPIC_API_KEY`       | —                                | cleanup                |
 | `GOOGLE_AI_KEY`           | —                                | cleanup                |
 | `TYPE_VIA_CLIPBOARD`      | `true`                           | typing                 |
