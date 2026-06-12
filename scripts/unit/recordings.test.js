@@ -4,7 +4,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readdirSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import {
   recordingTimestamp,
   pruneRecordings,
@@ -95,7 +95,7 @@ test("saveRecording: writes a WAV and returns its path", async () => {
     const path = await saveRecording(dir, pcm, 24000, { now: 1700000000000, rand: " z9z9".trim() });
     assert.ok(path && existsSync(path));
     assert.ok(path.endsWith(".wav"));
-    assert.equal(recordingTimestamp(path.split("/").pop()), 1700000000000);
+    assert.equal(recordingTimestamp(basename(path)), 1700000000000);
   } finally {
     cleanup();
   }
