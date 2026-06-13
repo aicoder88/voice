@@ -11,6 +11,8 @@ contextBridge.exposeInMainWorld("pillBridge", {
   copy: () => ipcRenderer.send("pill:copy"),
   openRecording: () => ipcRenderer.send("pill:open"),
   hide: () => ipcRenderer.send("pill:hide"),
+  // Opens the dictionary window so the user can add a misheard word.
+  addWord: () => ipcRenderer.send("pill:add-word"),
   // True while the pointer is over the visible pill: main flips the window
   // out of click-through so the buttons work; the transparent margins of the
   // fixed-size window stay click-through the rest of the time.

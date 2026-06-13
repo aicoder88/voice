@@ -52,7 +52,7 @@
         text-overflow: ellipsis;
         max-width: 380px;
       }
-      body.has-actions .label { max-width: 210px; }
+      body.has-actions .label { max-width: 160px; }
       /* Result reasons can be full sentences; let them wrap to two lines
          instead of ellipsizing away the instruction at the end. */
       body[data-state="success"] .label,
@@ -126,7 +126,8 @@
       <span class="sep"></span>
       <div class="actions">
         <button id="copy" type="button">Copy</button>
-        <button id="open" type="button">Open recording</button>
+        <button id="open" type="button">Recording</button>
+        <button id="addword" type="button">Add word</button>
         <!-- Always present on result pills so any pop-up can be dismissed on
              demand, even a bare "No speech detected" with nothing to copy. -->
         <button id="dismiss" class="dismiss" type="button" aria-label="Dismiss" title="Dismiss">✕</button>
@@ -143,6 +144,7 @@
       const labelEl = document.getElementById("label");
       const copyBtn = document.getElementById("copy");
       const openBtn = document.getElementById("open");
+      const addWordBtn = document.getElementById("addword");
       const dismissBtn = document.getElementById("dismiss");
 
       // Auto-hide for result states, paused while the pointer is over the pill
@@ -174,6 +176,7 @@
         const showOpen = isResult && data && data.canOpen;
         copyBtn.style.display = showCopy ? "" : "none";
         openBtn.style.display = showOpen ? "" : "none";
+        addWordBtn.style.display = isResult ? "" : "none";
         // Dismiss rides on every result pill, even one with no Copy/Open.
         dismissBtn.style.display = isResult ? "" : "none";
         copyBtn.textContent = "Copy";
@@ -204,6 +207,10 @@
       });
       openBtn.addEventListener("click", () => {
         window.pillBridge.openRecording();
+        lingerAfterAction();
+      });
+      addWordBtn.addEventListener("click", () => {
+        window.pillBridge.addWord();
         lingerAfterAction();
       });
       // Close the pop-up now, whatever state it's in.

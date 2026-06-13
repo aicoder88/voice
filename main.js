@@ -433,8 +433,8 @@ const PILL_BOTTOM_MARGIN = 28; // gap above the dock / taskbar
 const PILL_SIZES = {
   listening: { width: 200, height: 56 },
   transcribing: { width: 220, height: 56 },
-  success: { width: 480, height: 56 },
-  error: { width: 480, height: 56 }
+  success: { width: 560, height: 56 },
+  error: { width: 560, height: 56 }
 };
 
 // Pick the display the pill should appear on: the one holding the window the
@@ -933,12 +933,18 @@ async function processTranscript(transcript, restoreHwnd = null) {
 
   const cleanupEnabled = process.env.CLEANUP_ENABLED !== "false";
   const commaCount = (textToType.match(/,/g) || []).length;
+  const hasFiller = /\b(uh|um|uhh|er|erm)\b/i.test(textToType);
+  const hasOrdinal = /\b(first|second|third|fourth|fifth|next,|finally,)\b/i.test(textToType);
+  // Short, clean utterances skip LLM cleanup — they need only a trailing period,
+  // not restructuring. The LLM adds value on long or messy dictations; sending
+  // short clear phrases to it causes unneeded rewriting.
   const needsCleanup =
-    textToType.length > 120 ||
-    /\b(uh|um|uhh|er|erm)\b/i.test(textToType) ||
-    !/[.!?…]$/.test(textToType) ||
-    /\b(first|second|third|fourth|fifth|next,|finally,)\b/i.test(textToType) ||
-    commaCount >= 4;
+    (textToType.length >= 40 || hasFiller || hasOrdinal || commaCount >= 4) &&
+    (textToType.length > 120 ||
+     hasFiller ||
+     !/[.!?…]$/.test(textToType) ||
+     hasOrdinal ||
+     commaCount >= 4);
   if (cleanupEnabled && needsCleanup) {
     const t0 = Date.now();
     try {
@@ -1203,6 +1209,7 @@ function setupIpc() {
     }
   });
   ipcMain.on("pill:hide", () => hidePill());
+  ipcMain.on("pill:add-word", () => openDictionaryWindow());
   // Pointer entered/left the visible pill (renderer detects it from the
   // forwarded mouse moves). On=real clicks land; off=back to forward-only.
   ipcMain.on("pill:set-interactive", (_event, on) => {
