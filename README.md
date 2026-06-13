@@ -26,11 +26,11 @@ Pick one with `STT_PROVIDER` in `.env`:
 
 ## Custom dictionary
 
-GVoice keeps a list of names and made-up words it should spell exactly, and biases every engine toward them (Whisper's prompt, Deepgram's keyterm boosting, OpenAI's transcription prompt) — so they come out right instead of being guessed at.
+GVoice keeps a list of names and made-up words it should spell exactly. How it applies them depends on the engine: for the local Whisper engine the terms are fixed up *after* transcription (a near-miss like "Cloud" is corrected to your saved "Claud"); for the cloud engines (Deepgram keyterm boosting, OpenAI's prompt) they bias recognition up front. Whisper used to be biased up front too, but that made it hallucinate rare words onto unrelated audio (e.g. "a US price" → "a Unsplash price"), so the local path now corrects after the fact instead.
 
 Two ways to fill it:
 
-- **Add them yourself.** Tray menu → **Manage dictionary…** opens a window where you type in your brands, people, and coined terms. This is the reliable way to fix words the engine mishears — a made-up word gets transcribed as something *else*, so you have to seed the correct spelling before the engine can produce it.
+- **Add them yourself.** Tray menu → **Manage dictionary…** opens a window where you type in your brands, people, and coined terms. This is the reliable way to fix words the engine mishears. Keep entries to genuinely unusual proper nouns — a term that's one letter from an everyday word (e.g. "Stripe" vs "strip") can get over-applied.
 - **Let it suggest.** After a dictation, if GVoice spots an unusual name it typed — or notices you hand-fixing a word it got wrong — a small pop-up appears next to your cursor offering to remember it. You're asked once per word; "No thanks" is remembered for good.
 
 ## How it works

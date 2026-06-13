@@ -23,7 +23,7 @@ Runs the whole pipeline on your PC: a small Whisper model transcribes the clip, 
    WHISPER_BIN=C:\dev\voice\bin\whisper-cli.exe
    WHISPER_MODEL=C:\dev\voice\models\ggml-small-q5_1.bin
    ```
-4. (Optional) For LLM cleanup, paste an Anthropic or OpenAI key in `.env`. Without one, raw Whisper text is typed as-is.
+4. LLM cleanup (punctuation, filler removal, list formatting) works out of the box — GVoice ships a free-tier Groq key. To use your own provider/quota instead, set `CLEANUP_PROVIDER` + the matching key (`GROQ_API_KEY`, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, or `GOOGLE_AI_KEY`) in `.env`, or set `CLEANUP_ENABLED=false` to type raw Whisper text as-is.
 
 > Prefer not to touch the terminal? The Settings window (tray → **Settings…**) has an "On-device engine" panel that downloads the binaries and a model for you, runs a speed test on your machine, and switches the engine over — no script needed.
 
@@ -78,7 +78,8 @@ An Electron window opens with status info. A tray icon shows up in the system tr
 | `WHISPER_PORT` | *(free port each launch)* | Port the whisper-server child process listens on. Picked automatically; set this only to pin a fixed port. |
 | `CLEANUP_ENABLED` | `true` | LLM polish (punctuation, remove "um"/"uh"). |
 | `CLEANUP_PROVIDER` | `groq` (ships a free-tier key, so cleanup works with no setup) | Which API runs the cleanup pass: `groq`, `openai`, `anthropic`, or `google`. |
-| `CLEANUP_MODEL` | *(per provider)* | Cleanup model. Defaults: `llama-3.3-70b-versatile` (groq), `gpt-4.1-mini` (openai), `claude-haiku-4-5` (anthropic), `gemini-2.5-flash-lite` (google). |
+| `CLEANUP_MODEL` | *(per provider)* | Cleanup model. Defaults: `meta-llama/llama-4-scout-17b-16e-instruct` (groq), `gpt-4.1-mini` (openai), `claude-haiku-4-5` (anthropic), `gemini-2.5-flash-lite` (google). The Groq default is fast, formats spoken lists into proper bullet/numbered lists, and has the highest free-tier token limit of Groq's models. |
+| `CLEANUP_TIMEOUT_MS` | `2500` | Max wait for the cleanup pass before falling back to the raw transcript. A 429 rate-limit is not retried (its limit resets per minute, so an immediate retry just fails again); 5xx/network errors still get one retry. |
 | `TYPE_VIA_CLIPBOARD` | `true` | Paste vs simulated keystrokes. Paste is faster and more reliable. |
 | `PORT` | `3000` | Local relay port. |
 | `GVOICE_CORRECTION_WATCH_MS` | `12000` | How long after a dictation GVoice watches for a hand-typed correction (macOS/Linux). Set to `0` to turn manual-edit suggestions off. |
@@ -86,14 +87,19 @@ An Electron window opens with status info. A tray icon shows up in the system tr
 
 ## Custom dictionary
 
-GVoice keeps a list of names and made-up words it should spell exactly, and feeds it to whichever engine you use (Whisper's initial prompt, Deepgram's keyterm boosting, OpenAI's transcription prompt). This is what makes the engine *produce* an unusual word instead of guessing a real one in its place.
+GVoice keeps a list of names and made-up words it should spell exactly. It applies them two different ways depending on the engine:
 
-- **Add your own words.** Tray menu → **Manage dictionary…** opens a window where you type in brands, people, and coined terms (one at a time, or several comma-separated). This is the dependable fix for words the engine mishears: a made-up word is transcribed as something else, so you seed the correct spelling and the engine biases toward it on the next dictation.
+- **Local Whisper — corrected *after* transcription.** Whisper transcribes normally, then GVoice fixes any word that's a genuine near-miss of a saved term (same first letter, edit distance 1–2, ≤25% of the word's length), preserving capitalization. Whisper's initial prompt is **not** seeded with your terms anymore: doing so biased the model into hallucinating rare words onto unrelated audio ("a US price" → "a Unsplash price"). Fix-after never touches a word that sounds nothing like a term.
+- **Cloud engines — biased up front.** Deepgram keyterm boosting and OpenAI's transcription prompt still receive the terms so recognition leans toward them.
+
+Filling the dictionary:
+
+- **Add your own words.** Tray menu → **Manage dictionary…** opens a window where you type in brands, people, and coined terms (one at a time, or several comma-separated). Keep them to genuinely unusual proper nouns — a term one letter from an everyday word (e.g. "Stripe" vs "strip") can get over-applied, since the fix-after step can't tell which you meant.
 - **Or let it suggest.** After a dictation, if GVoice sees an unusual capitalized name it typed — or notices you immediately retyping a word it got wrong — a small pop-up appears at your cursor: *Add "Estefania" to your dictionary?* Click **Add** or **No thanks**.
 - **It asks once.** A "No thanks" is remembered forever; a word is never suggested twice.
-- **Deepgram boosting is English-only** (a Deepgram limitation). Whisper biasing works in every language. The dictionary is stored per-user in the app's data folder, not in the repo.
+- **Deepgram boosting is English-only** (a Deepgram limitation). Whisper fix-after correction works in every language. The dictionary is stored per-user in the app's data folder, not in the repo.
 
-A hand-curated starter list lives in `models/vocab.txt` (used by the local Whisper engine); the manager and the pop-up write to the separate per-user store.
+A hand-curated starter list lives in `models/vocab.txt` — this *is* still fed to the local Whisper engine as its initial prompt, but it's curated contextual prose (e.g. "Purrify is a cat-care brand"), which the model handles without the hallucination problem that bare term lists caused. The manager and the pop-up write to the separate per-user store.
 
 ## Languages
 

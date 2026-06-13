@@ -59,14 +59,14 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 - **`hotkey-logic.js`** — Pure press/release/tap state machines shared by both hotkey backends, unit-tested with an injectable clock.
 - **`foreground.js`** — Win32 FFI helpers: capture/restore the focused window around a dictation, anchor the pill to it, and read raw key state for the Windows hotkey poll.
 - **`typing.js`** — Injects the final transcript into the focused field. Default path: write to clipboard, fire Cmd/Ctrl+V via `@nut-tree-fork/nut-js`, restore the previous clipboard after 250 ms. Fallback path (`TYPE_VIA_CLIPBOARD=false`): direct synthetic keystrokes.
-- **`cleanup.js`** — Optional LLM polish pass. Provider-agnostic (OpenAI / Groq / Anthropic / Google). Long system prompt enforces paragraph + list rules; preserves language and every dictated sentence. Returns raw text on any error.
+- **`cleanup.js`** — Optional LLM polish pass. Provider-agnostic (OpenAI / Groq / Anthropic / Google). Long system prompt enforces paragraph + list rules; preserves language and every dictated sentence. Returns raw text on any error. Groq default is `llama-4-scout-17b` (fast, formats lists, highest free-tier token limit); times out at 2.5s and does not retry a 429.
 - **`dictation-session.js`** — Push-to-talk session state (busy flag, press/release timestamps, safety timer). One instance per main process.
 - **`bootstrap-env.js`** — Boot-time `.env` loading. Imported first from `main.js` so a packaged app launched from Finder still finds its environment.
 - **`settings.js`** — Settings store backing the Settings window. The one module that edits the `.env` file, surgically (existing keys updated in place, comments preserved).
 - **`history.js`** — The last 50 transcripts, persisted to a JSON file in userData. Feeds the tray's "Recent dictations" menu.
 - **`recordings.js`** — Saved dictation audio: writes clips, prunes by count cap (50) and age cap (`RECORDING_RETENTION_DAYS`).
-- **`retry.js`** — One-retry helper for the HTTP calls (cleanup pass, whisper-server POST) so a single 429/5xx doesn't fail a dictation.
-- **`vocab.js`** — Custom dictionary store, shared by the main process and the relay providers (same Node process).
+- **`retry.js`** — One-retry helper for the HTTP calls (cleanup pass, whisper-server POST) so a single 5xx/network blip doesn't fail a dictation. Callers can opt a status out: the cleanup pass excludes 429 (a per-minute rate limit won't clear in 300ms).
+- **`vocab.js`** — Custom dictionary store, shared by the main process and the relay providers (same Node process). Also exposes `correctTranscript()`, the fix-after near-miss correction applied to local-Whisper output (the custom terms are no longer injected into Whisper's prompt — that caused hallucinations). Cloud providers still get keyterm/prompt biasing via `deepgramKeyterms()` / `openaiPromptAddition()`.
 - **`correction-watch.js`** — Watches the keystroke stream for a hand-typed fix right after a dictation (macOS/Linux) to suggest dictionary entries.
 - **`hardware.js`** / **`benchmark.js`** / **`benchmark-run.js`** — The on-device engine decision chain: a cheap capability probe, the pure "fast enough vs cloud?" verdict, and the live timed transcription that feeds it.
 - **`model-download.js`** — On-demand download of whisper.cpp binaries + GGML models for the guided on-device setup in Settings.
@@ -93,7 +93,7 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 
 ### `scripts/`
 
-- **`cleanup-test.js`** — Ad-hoc test harness for `src/cleanup.js`. Runs eight named cases through `polishTranscript` and prints pass/fail.
+- **`cleanup-test.js`** — Ad-hoc test harness for `src/cleanup.js`. Runs nine named cases through `polishTranscript` and prints pass/fail.
 - **`parity/`** — Parity test harness for refactor passes. `dictation-flow.test.js` boots `startServer()`, opens a WS client, feeds a recorded PCM fixture, and asserts the emitted frame sequence per provider. Fixtures in `parity/fixtures/`.
 - **`unit/`** — Node-runner unit tests for the pure modules (hotkey logic, mic health, benchmark verdicts, …).
 - **`setup-whisper-windows.ps1`** — Downloads whisper.cpp binaries + a model on Windows (the manual alternative to the guided setup in Settings).
@@ -136,7 +136,7 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 | `CLEANUP_ENABLED`         | `true`                           | main                   |
 | `CLEANUP_PROVIDER`        | `groq` (ships a free-tier key)   | cleanup                |
 | `CLEANUP_MODEL`           | provider-specific                | cleanup                |
-| `CLEANUP_TIMEOUT_MS`      | `6000`                           | cleanup                |
+| `CLEANUP_TIMEOUT_MS`      | `2500`                           | cleanup                |
 | `GROQ_API_KEY`            | baked-in fallback (set to override) | cleanup             |
 | `ANTHROPIC_API_KEY`       | —                                | cleanup                |
 | `GOOGLE_AI_KEY`           | —                                | cleanup                |
