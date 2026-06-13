@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "node server.js",
     "start": "electron .",
-    "build": "electron-builder",
+    "build": "node scripts/copy-native.cjs && electron-builder",
     "test:parity": "node --test --test-force-exit scripts/parity/dictation-flow.test.js",
     "test:cleanup": "node scripts/cleanup-test.js",
     "test:unit": "node --test scripts/unit/*.test.js"
@@ -43,6 +43,12 @@
       "src/**/*",
       "public/**/*",
       "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "build/native",
+        "to": "koffi"
+      }
     ],
     "icon": "build/icon.png",
     "mac": {
