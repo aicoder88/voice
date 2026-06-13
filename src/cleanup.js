@@ -28,11 +28,12 @@ const GROQ_FALLBACK_KEY = [
 const CLEANUP_PROVIDER = (process.env.CLEANUP_PROVIDER || "groq").toLowerCase();
 /** @type {Record<string, ProviderConfig>} */
 const PROVIDER_DEFAULTS = {
-  // 8b-instant over 70b-versatile: the cleanup task (punctuation, capitalization,
-  // filler removal, light structure) needs no heavyweight reasoning, and 8b is
-  // ~2-3x faster with a far higher free-tier rate limit — so the shared fallback
-  // key hits 429s much less often. Override with CLEANUP_MODEL for more polish.
-  groq: { kind: "openai", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.1-8b-instant", keyEnv: "GROQ_API_KEY", fallbackKey: GROQ_FALLBACK_KEY },
+  // llama-4-scout-17b is the sweet spot for the cleanup task: faster than
+  // 70b-versatile (~250ms vs ~350ms), it formats spoken enumerations into proper
+  // numbered/bulleted lists (which 8b-instant botches), and its free-tier token
+  // limit is the highest of the lot (30k TPM vs 12k for 70b, 6k for 8b) — so it
+  // hits 429s the least. No reasoning overhead. Override with CLEANUP_MODEL.
+  groq: { kind: "openai", url: "https://api.groq.com/openai/v1/chat/completions", model: "meta-llama/llama-4-scout-17b-16e-instruct", keyEnv: "GROQ_API_KEY", fallbackKey: GROQ_FALLBACK_KEY },
   openai: { kind: "openai", url: "https://api.openai.com/v1/chat/completions", model: "gpt-4.1-mini", keyEnv: "OPENAI_API_KEY" },
   anthropic: { kind: "anthropic", url: "https://api.anthropic.com/v1/messages", model: "claude-haiku-4-5", keyEnv: "ANTHROPIC_API_KEY" },
   google: { kind: "google", url: "https://generativelanguage.googleapis.com/v1beta/models", model: "gemini-2.5-flash-lite", keyEnv: "GOOGLE_AI_KEY" }
