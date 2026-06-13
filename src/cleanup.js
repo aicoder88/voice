@@ -1,7 +1,7 @@
 // @ts-check
 
 import * as vocab from "./vocab.js";
-import { withRetry, httpError, RetryableHttpError, HttpError } from "./retry.js";
+import { withRetry, httpError, RetryableHttpError, HttpError, isRetryableError } from "./retry.js";
 
 /**
  * @typedef {object} ProviderConfig
@@ -28,14 +28,21 @@ const GROQ_FALLBACK_KEY = [
 const CLEANUP_PROVIDER = (process.env.CLEANUP_PROVIDER || "groq").toLowerCase();
 /** @type {Record<string, ProviderConfig>} */
 const PROVIDER_DEFAULTS = {
-  groq: { kind: "openai", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.3-70b-versatile", keyEnv: "GROQ_API_KEY", fallbackKey: GROQ_FALLBACK_KEY },
+  // 8b-instant over 70b-versatile: the cleanup task (punctuation, capitalization,
+  // filler removal, light structure) needs no heavyweight reasoning, and 8b is
+  // ~2-3x faster with a far higher free-tier rate limit — so the shared fallback
+  // key hits 429s much less often. Override with CLEANUP_MODEL for more polish.
+  groq: { kind: "openai", url: "https://api.groq.com/openai/v1/chat/completions", model: "llama-3.1-8b-instant", keyEnv: "GROQ_API_KEY", fallbackKey: GROQ_FALLBACK_KEY },
   openai: { kind: "openai", url: "https://api.openai.com/v1/chat/completions", model: "gpt-4.1-mini", keyEnv: "OPENAI_API_KEY" },
   anthropic: { kind: "anthropic", url: "https://api.anthropic.com/v1/messages", model: "claude-haiku-4-5", keyEnv: "ANTHROPIC_API_KEY" },
   google: { kind: "google", url: "https://generativelanguage.googleapis.com/v1beta/models", model: "gemini-2.5-flash-lite", keyEnv: "GOOGLE_AI_KEY" }
 };
 const PROVIDER = PROVIDER_DEFAULTS[CLEANUP_PROVIDER] || PROVIDER_DEFAULTS.openai;
 const CLEANUP_MODEL = process.env.CLEANUP_MODEL || PROVIDER.model;
-const TIMEOUT_MS = Number(process.env.CLEANUP_TIMEOUT_MS || 6000);
+// 2.5s ceiling: cleanup is a fast formatting pass, not a long generation. A call
+// that hasn't returned by then is hung or queued behind a rate limit; waiting the
+// old 6s just freezes the paste. On timeout we fall back to the raw transcript.
+const TIMEOUT_MS = Number(process.env.CLEANUP_TIMEOUT_MS || 2500);
 
 const SYSTEM_PROMPT = `OUTPUT FORMAT — CRITICAL, READ FIRST:
 Output ONLY the cleaned transcript text. Nothing before it. Nothing after it. No "Here is the cleaned text:", no preamble, no commentary, no thinking, no explanation. Your entire response must be the transcript itself, nothing else. If you produce anything other than the cleaned transcript, it corrupts the user's document.
@@ -162,11 +169,13 @@ export async function polishTranscript(rawText) {
 
   const req = buildRequest(PROVIDER, apiKey, CLEANUP_MODEL, SYSTEM_PROMPT, userContent);
 
-  // One quick retry on a transient hiccup (429 rate-limit, 5xx, dropped
-  // connection) so a single bad moment doesn't silently fall back to the raw,
-  // unformatted transcript. Each attempt gets its own timeout budget; an abort
-  // (the request genuinely ran out of time) is NOT retried — retrying would only
-  // double the wait the user is already feeling.
+  // One quick retry on a transient hiccup (5xx, dropped connection) so a single
+  // bad moment doesn't silently fall back to the raw, unformatted transcript.
+  // A 429 is the exception: the shared free key's rate limit resets per MINUTE,
+  // so an immediate retry just 429s again — pure wasted latency the user feels.
+  // Fail fast on 429 (fall back to raw); still retry 5xx/408/network errors.
+  // Each attempt gets its own timeout budget; an abort (the request genuinely ran
+  // out of time) is NOT retried — retrying would only double the wait.
   try {
     const data = await withRetry(
       async () => {
@@ -190,6 +199,9 @@ export async function polishTranscript(rawText) {
       },
       {
         retries: 1,
+        // Retry transient errors, but never a 429 — its limit won't clear in 300ms.
+        isRetryable: (err) =>
+          isRetryableError(err) && !(err instanceof RetryableHttpError && err.status === 429),
         onRetry: (err) =>
           console.error(`Cleanup transient failure, retrying once (${CLEANUP_PROVIDER}/${CLEANUP_MODEL}):`, err && err.message)
       }
