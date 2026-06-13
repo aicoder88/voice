@@ -189,6 +189,73 @@ export function wordsOf(text) {
 }
 
 /**
+ * Fix-after-the-fact vocabulary correction. Whisper transcribes naturally (the
+ * custom dictionary is NOT fed into its initial prompt anymore — that bias made
+ * it hallucinate rare words onto unrelated audio). Here we repair the output:
+ * each transcribed word that is a GENUINE near-miss of a saved term is swapped
+ * for the term's canonical spelling. A word that sounds nothing like a term is
+ * left alone, which is the whole point.
+ *
+ * Guards that keep this from mangling ordinary speech:
+ *  - same first letter as the term (whisper mishears rarely change the onset:
+ *    "Cloud"→"Claud" yes; "like"→"Mike" no). This alone blocks most collisions.
+ *  - edit distance 1–2 AND ≤25% of the longer word, so only true look-alikes
+ *    match ("US" never becomes "Unsplash" — the distance is enormous).
+ *  - terms shorter than 4 chars are skipped: too little signal, too risky.
+ *  - a spoken word that is already a known/common word (seed or an exact term)
+ *    is left alone — a desired correction always starts from a garbled non-word,
+ *    never from a word whisper already got right.
+ *
+ * INHERENT LIMITATION: a term that is one edit from a common word ("Stripe" vs
+ * "strip", "Resend" vs "resent") will rewrite that common word too — it is
+ * structurally identical to the "Cloud"→"Claud" case we WANT, so no rule can
+ * separate them. Keep the dictionary to genuinely rare proper nouns, exactly as
+ * models/vocab.txt cautions. Capitalization of the spoken word is preserved.
+ *
+ * @param {string} text
+ * @returns {string}
+ */
+export function correctTranscript(text) {
+  if (!text) return text;
+  const known = knownSet(); // seed words + exact terms — never rewrite these
+  const targets = getTerms()
+    .map((term) => ({ term, key: normalize(term) }))
+    .filter((t) => t.key.length >= 4 && !seedSet().has(t.key));
+  if (!targets.length) return text;
+  return text.replace(WORD_RE, (word) => {
+    const lower = word.toLowerCase();
+    if (known.has(lower)) return word; // already a real word — don't touch it
+    let best = null;
+    let bestDist = Infinity;
+    for (const t of targets) {
+      if (t.key[0] !== lower[0]) continue; // onset must match
+      const dist = levenshtein(lower, t.key);
+      const maxLen = Math.max(lower.length, t.key.length);
+      if (dist > 0 && dist <= 2 && dist <= Math.floor(maxLen * 0.25) && dist < bestDist) {
+        best = t;
+        bestDist = dist;
+      }
+    }
+    return best ? applyCase(word, best.term) : word;
+  });
+}
+
+/**
+ * Put the spoken word's capitalization onto the canonical replacement so a fix
+ * never corrupts sentence position: ALL-CAPS spoken → upper-case; a capitalized
+ * spoken word → ensure the term starts capitalized; otherwise keep the term's
+ * stored casing (so internal caps like "GitHub" survive).
+ * @param {string} spoken @param {string} term
+ */
+function applyCase(spoken, term) {
+  if (spoken.length > 1 && spoken === spoken.toUpperCase()) return term.toUpperCase();
+  if (/^\p{Lu}/u.test(spoken) && !/^\p{Lu}/u.test(term)) {
+    return term.charAt(0).toUpperCase() + term.slice(1);
+  }
+  return term;
+}
+
+/**
  * Decide whether a word the user just typed by hand looks like a correction of
  * something GVoice typed (a near-miss within edit distance 2). Returns the
  * original misheard word if so, else null. Used by the manual-edit watcher.
@@ -238,12 +305,11 @@ function levenshtein(a, b) {
 
 // --- Per-provider formatting -----------------------------------------------
 
-/** Sentence appended to whisper's initial prompt. "" when no custom terms. */
-export function whisperPromptAddition() {
-  const terms = getTerms();
-  if (!terms.length) return "";
-  return "Words that may appear: " + terms.join(", ") + ".";
-}
+// NOTE: there is deliberately no whisper initial-prompt helper here. Feeding
+// custom terms into whisper's prompt biased it into hallucinating rare words
+// onto unrelated audio; custom terms are applied AFTER transcription instead via
+// correctTranscript(). Deepgram/OpenAI keep their biasing — their keyterm/prompt
+// boosting is far less hallucination-prone than whisper's free-text prompt.
 
 /**
  * Terms for Deepgram keyterm / keywords boosting (English only — see caller).

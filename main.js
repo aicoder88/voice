@@ -931,6 +931,16 @@ async function processTranscript(transcript, restoreHwnd = null) {
     return null;
   }
 
+  // Fix-after-the-fact vocabulary correction (runs before cleanup so the LLM
+  // sees the right spellings). Custom terms are no longer biased into whisper's
+  // prompt; instead we repair genuine near-misses here ("Cloud"→"Claud") while
+  // leaving unrelated words untouched. No-op when the dictionary is empty.
+  const corrected = vocab.correctTranscript(textToType);
+  if (corrected !== textToType) {
+    dlog("vocab-correct", { from: textToType, to: corrected });
+    textToType = corrected;
+  }
+
   const cleanupEnabled = process.env.CLEANUP_ENABLED !== "false";
   const commaCount = (textToType.match(/,/g) || []).length;
   const hasFiller = /\b(uh|um|uhh|er|erm)\b/i.test(textToType);

@@ -18,7 +18,6 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sendToClient, wrapWav } from "./_shared.js";
-import * as vocab from "../vocab.js";
 import { withRetry, httpError } from "../retry.js";
 
 const SAMPLE_RATE = 24000;
@@ -151,20 +150,21 @@ let promptLogged = false;
  */
 async function loadPrompt() {
   const { raw, source } = await resolvePrompt();
-  // Fold in the user's custom dictionary (the words added via the cursor
-  // pop-up) on top of the hand-curated seed prompt. Re-read every commit so a
-  // just-added word biases the very next dictation.
-  let combined = raw;
-  try {
-    const addition = vocab.whisperPromptAddition();
-    if (addition) combined = combined ? combined + " " + addition : addition;
-  } catch {}
+  // Only the hand-curated seed (models/vocab.txt / WHISPER_PROMPT) goes into the
+  // initial prompt. The user's dynamic dictionary (words added via the cursor
+  // pop-up) is deliberately NOT injected here: whisper's initial_prompt is a
+  // bias, so a rare added proper noun ("Unsplash") gets hallucinated onto audio
+  // that sounds nothing like it. Those terms are applied AFTER transcription
+  // instead — see vocab.correctTranscript, a fuzzy fix that only fires on a
+  // genuine near-miss. The seed file stays because it's curated prose written to
+  // avoid that trap (see the cautions at the top of models/vocab.txt).
+  const combined = raw;
   const truncated = combined.length > MAX_PROMPT_CHARS;
   const prompt = truncated ? combined.slice(0, MAX_PROMPT_CHARS) : combined;
   if (!promptLogged) {
     promptLogged = true;
     const note = truncated ? " (truncated from " + combined.length + ")" : "";
-    console.error("[whisper-local] vocab prompt: " + prompt.length + " chars from " + source + " + custom dictionary" + note);
+    console.error("[whisper-local] seed prompt: " + prompt.length + " chars from " + source + note);
   }
   return prompt;
 }

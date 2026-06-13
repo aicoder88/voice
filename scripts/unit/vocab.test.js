@@ -111,12 +111,69 @@ test("isLikelyCorrection: rejects lowercase, too-short, exact, and far words", (
   }
 });
 
-test("whisperPromptAddition: empty without terms, lists them with terms", () => {
+test("correctTranscript: fixes a genuine near-miss to the canonical spelling", () => {
   const { cleanup } = freshStore();
   try {
-    assert.equal(vocab.whisperPromptAddition(), "");
-    vocab.addTerm("Debezium");
-    assert.match(vocab.whisperPromptAddition(), /Debezium/);
+    vocab.addTerm("Claud");
+    // whisper mishears the name as a common look-alike; same onset, distance 1.
+    assert.equal(vocab.correctTranscript("I told Cloud to do it."), "I told Claud to do it.");
+    assert.equal(vocab.correctTranscript("Purrify"), "Purrify"); // exact term untouched
+  } finally {
+    cleanup();
+  }
+});
+
+test("correctTranscript: never replaces words that sound nothing like a term", () => {
+  const { cleanup } = freshStore();
+  try {
+    vocab.addTerm("Unsplash");
+    // The bug we are fixing: "US"/"a us price" must NOT become Unsplash.
+    assert.equal(vocab.correctTranscript("a US price versus a normal price"), "a US price versus a normal price");
+    assert.equal(vocab.correctTranscript("us"), "us");
+  } finally {
+    cleanup();
+  }
+});
+
+test("correctTranscript: onset guard stops short-name collisions", () => {
+  const { cleanup } = freshStore();
+  try {
+    vocab.addTerm("Mike");
+    // "like"/"bike" are distance 1 from "Mike" but start with a different letter.
+    assert.equal(vocab.correctTranscript("I would like a bike"), "I would like a bike");
+  } finally {
+    cleanup();
+  }
+});
+
+test("correctTranscript: no-op with an empty dictionary", () => {
+  const { cleanup } = freshStore();
+  try {
+    assert.equal(vocab.correctTranscript("nothing to change here"), "nothing to change here");
+  } finally {
+    cleanup();
+  }
+});
+
+test("correctTranscript: preserves the spoken word's capitalization", () => {
+  const { cleanup } = freshStore();
+  try {
+    vocab.addTerm("github"); // stored lowercase
+    // Capitalized at sentence start stays capitalized; lowercase stays lowercase.
+    assert.equal(vocab.correctTranscript("Githubb is great"), "Github is great");
+    assert.equal(vocab.correctTranscript("on githubb today"), "on github today");
+  } finally {
+    cleanup();
+  }
+});
+
+test("correctTranscript: never rewrites a word that is itself a known seed word", () => {
+  const { cleanup } = freshStore();
+  try {
+    // "Anthropic" is a seed word (models/vocab.txt). A term one edit away must
+    // not steal it. "Authropic" (a non-word mishear) still gets fixed.
+    vocab.addTerm("Anthropoc");
+    assert.equal(vocab.correctTranscript("I use Anthropic daily"), "I use Anthropic daily");
   } finally {
     cleanup();
   }
