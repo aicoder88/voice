@@ -17,13 +17,16 @@ const mimeTypes = {
 
 /**
  * Boot the local HTTP server + WebSocket relay. Serves static files from
- * `public/` and attaches the realtime relay at `/realtime`. Tries `port`
- * first; if taken, falls back to an OS-chosen free port.
+ * `public/` and attaches the realtime relay at `/realtime`. Defaults to an
+ * OS-chosen free port (port 0) so the relay never collides with another dev
+ * server on a well-known port like 3000 — a recurring cause of the dictation
+ * window loading the wrong app. Set PORT to pin a specific port; if that's
+ * taken, it still falls back to a free one.
  *
  * @param {{ port?: number, model?: string, recordingsDir?: string }} [options]
  * @returns {Promise<{ server: import("node:http").Server, port: number }>}
  */
-export function startServer({ port = Number(process.env.PORT || 3000), model = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2", recordingsDir } = {}) {
+export function startServer({ port = Number(process.env.PORT || 0), model = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime-2", recordingsDir } = {}) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url || "/", `http://${request.headers.host}`);
 

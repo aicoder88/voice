@@ -419,7 +419,7 @@ function createPillWindow() {
   pillWindow.setIgnoreMouseEvents(true);
 
   if (serverPort) {
-    pillWindow.loadURL(`http://localhost:${serverPort}/pill.html`);
+    pillWindow.loadURL(`http://127.0.0.1:${serverPort}/pill.html`);
   } else {
     pillWindow.loadFile(join(__dirname, "public", "pill.html"));
   }
@@ -581,7 +581,7 @@ function createVocabWindow() {
   vocabWindow.setIgnoreMouseEvents(false);
   vocabWindow.webContents.once("did-finish-load", () => { vocabWindowReady = true; });
   if (serverPort) {
-    vocabWindow.loadURL(`http://localhost:${serverPort}/vocab-prompt.html`);
+    vocabWindow.loadURL(`http://127.0.0.1:${serverPort}/vocab-prompt.html`);
   } else {
     vocabWindow.loadFile(join(__dirname, "public", "vocab-prompt.html"));
   }
@@ -688,7 +688,7 @@ function openDictionaryWindow() {
     if (dictionaryWindow && !dictionaryWindow.isDestroyed()) dictionaryWindow.focus();
   });
   if (serverPort) {
-    dictionaryWindow.loadURL(`http://localhost:${serverPort}/dictionary.html`);
+    dictionaryWindow.loadURL(`http://127.0.0.1:${serverPort}/dictionary.html`);
   } else {
     dictionaryWindow.loadFile(join(__dirname, "public", "dictionary.html"));
   }
@@ -733,7 +733,7 @@ function openSettingsWindow(opts = {}) {
     }
   });
   if (serverPort) {
-    settingsWindow.loadURL(`http://localhost:${serverPort}/settings.html`);
+    settingsWindow.loadURL(`http://127.0.0.1:${serverPort}/settings.html`);
   } else {
     settingsWindow.loadFile(join(__dirname, "public", "settings.html"));
   }
@@ -784,7 +784,7 @@ function createDictationWindow() {
     dlog("renderer-unresponsive", {});
   });
   const provider = encodeURIComponent((process.env.STT_PROVIDER || "openai").toLowerCase());
-  dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html?provider=${provider}`);
+  dictationWindow.loadURL(`http://127.0.0.1:${serverPort}/dictation.html?provider=${provider}`);
 }
 
 // Languages cycled by the right-Ctrl tap. Stored in process.env so deepgram.js
@@ -1488,9 +1488,9 @@ function rebuildTrayMenu() {
     { type: "separator" },
     // Engine-room jargon that opened a leftover dev page — dev runs only.
     ...(VERBOSE ? [{
-      label: serverPort ? `Relay: http://localhost:${serverPort}` : "Relay: not running",
+      label: serverPort ? `Relay: http://127.0.0.1:${serverPort}` : "Relay: not running",
       enabled: !!serverPort,
-      click: () => { if (serverPort) shell.openExternal(`http://localhost:${serverPort}`); }
+      click: () => { if (serverPort) shell.openExternal(`http://127.0.0.1:${serverPort}`); }
     }] : []),
     {
       label: "Start at login",
@@ -1594,7 +1594,7 @@ async function bringUpDictation(onReady) {
 function reloadDictationWindow() {
   if (!serverPort || !dictationWindow || dictationWindow.isDestroyed()) return;
   const provider = encodeURIComponent((process.env.STT_PROVIDER || "openai").toLowerCase());
-  dictationWindow.loadURL(`http://localhost:${serverPort}/dictation.html?provider=${provider}`);
+  dictationWindow.loadURL(`http://127.0.0.1:${serverPort}/dictation.html?provider=${provider}`);
 }
 
 // Apply an already-written .env patch to the LIVE app without a restart: mirror
