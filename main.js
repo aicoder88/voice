@@ -1092,6 +1092,9 @@ function setupIpc() {
     const text = typeof payload === "string" ? payload : (payload && payload.text) || "";
     const chunks = (payload && typeof payload === "object" && payload.chunks) || null;
     const sampleRate = (payload && typeof payload === "object" && payload.sampleRate) || undefined;
+    // Captured audio proves the mic worked at least once — unlocks the relaunch
+    // recovery rung for a later wedge.
+    if (chunks && chunks.length) everHadLiveMic = true;
     const { releaseAt, sinceRelease } = dictation.finalize();
     debug("[main] received transcript (" + sinceRelease + "ms after release):", JSON.stringify(text));
     dlog("transcript", { len: (text || "").trim().length, sinceRelease });
@@ -1381,6 +1384,90 @@ function setupIpc() {
     showPillResult("error", null, null, { reason: message });
     showMicWarning(message);
   });
+
+  // The renderer healed the mic on its own — drop the warning so the user isn't
+  // left staring at a stale "check your microphone" pill, and reset the
+  // escalation ladder so the next dead-mic episode starts fresh.
+  ipcMain.on("dictation:mic-recovered", () => {
+    console.error("[main] mic recovered (auto)");
+    dlog("mic-recovered", {});
+    recoveryReloadedAt = 0;
+    everHadLiveMic = true;
+    try { hidePill(); } catch {}
+  });
+
+  // The renderer tried hard to find a live mic and couldn't. Escalate, cheapest
+  // first: reload the hidden renderer (fresh AudioContext); if that already
+  // happened this episode and the mic is STILL dead, the audio service itself is
+  // wedged — only a full relaunch respawns it. Guarded so neither step can loop.
+  ipcMain.on("dictation:escalate-recovery", (_event, reason) => {
+    handleRecoveryEscalation(typeof reason === "string" ? reason : "recovery");
+  });
+}
+
+// Escalation ladder state. recoveryReloadedAt marks the renderer reload for the
+// current dead-mic episode (cleared on recovery); lastAutoRelaunchAt rate-limits
+// the heavy last-resort relaunch.
+let recoveryReloadedAt = 0;
+// Whether a live mic has worked at all this session. Gates the heavy relaunch
+// rung: if the mic never once worked, relaunching won't conjure hardware — it'd
+// just boot-loop. Relaunch targets the "was working, then the audio service
+// wedged" case, which a restart actually fixes.
+let everHadLiveMic = false;
+// Survive the cooldown across an auto-relaunch: a fresh process would reset an
+// in-memory counter to 0 and could relaunch-loop if the mic is genuinely gone.
+// The relaunch carries its timestamp in argv so the restarted instance still
+// rate-limits itself.
+let lastAutoRelaunchAt = (() => {
+  const arg = process.argv.find((a) => a.startsWith("--mic-relaunch-at="));
+  const ts = arg ? Number(arg.split("=")[1]) : 0;
+  return Number.isFinite(ts) ? ts : 0;
+})();
+const RECOVERY_EPISODE_MS = 120000;   // a fresh escalation after this = new episode
+const AUTO_RELAUNCH_COOLDOWN_MS = 300000; // never auto-relaunch more than once / 5 min
+
+function handleRecoveryEscalation(reason) {
+  const now = Date.now();
+  dlog("recovery-escalate", { reason });
+  // First escalation of this episode → reload the renderer. Cheap and invisible:
+  // a brand-new renderer + AudioContext, which re-probes for a live device on
+  // load. Reuses the shared audio helper process, so if THAT is the wedge this
+  // won't help — which is exactly what the relaunch step below is for.
+  if (!recoveryReloadedAt || now - recoveryReloadedAt > RECOVERY_EPISODE_MS) {
+    recoveryReloadedAt = now;
+    console.error("[main] mic recovery → reloading dictation renderer");
+    reloadDictationWindow();
+    return;
+  }
+  // Reload already tried this episode and the mic is still dead. The audio
+  // service is wedged; a full relaunch respawns it. Two guards keep this from
+  // becoming a restart loop: it must have worked at least once this session
+  // (else there's no wedge to clear, only missing hardware), and it's rate-
+  // limited (the timestamp survives the relaunch via argv).
+  if (!everHadLiveMic) {
+    console.error("[main] mic recovery → relaunch skipped (mic never worked this session)");
+    showMicWarning("GVoice can't find a working microphone. Open System Settings → Sound → Input and pick one.");
+    return;
+  }
+  if (now - lastAutoRelaunchAt < AUTO_RELAUNCH_COOLDOWN_MS) {
+    console.error("[main] mic recovery → relaunch suppressed (cooldown)");
+    showMicWarning("GVoice can't reach your microphone. Open System Settings → Sound → Input, pick your mic, then try again.");
+    return;
+  }
+  lastAutoRelaunchAt = now;
+  console.error("[main] mic recovery → relaunching app to clear wedged audio");
+  dlog("auto-relaunch", { reason });
+  try {
+    if (Notification.isSupported()) {
+      new Notification({ title: "GVoice", body: "Restarted to fix the microphone — give it a second." }).show();
+    }
+  } catch {}
+  // Carry the relaunch timestamp into the next process so its cooldown holds
+  // (drop any stale flag first so the arg list can't grow on repeat relaunches).
+  const args = process.argv.slice(1).filter((a) => !a.startsWith("--mic-relaunch-at="));
+  args.push("--mic-relaunch-at=" + now);
+  app.relaunch({ args });
+  app.exit(0);
 }
 
 let lastMicWarningAt = 0;
@@ -1413,6 +1500,24 @@ function setupPowerMonitor() {
   powerMonitorWired = true;
   const rebuild = (/** @type {string} */ reason) => {
     dlog("power", reason);
+    // The menu-bar icon sometimes drops during sleep/wake — and with no window,
+    // a missing icon means no way back into the app. The Tray object usually
+    // isn't destroyed when the icon vanishes (it's held in a module var), so a
+    // destroyed-check alone wouldn't fire — re-assert the image unconditionally
+    // to force a redraw, and only fully recreate if the object is actually gone.
+    // Log the real state so a future occurrence is diagnosable instead of guessed.
+    try {
+      const state = tray ? (tray.isDestroyed() ? "destroyed" : "alive") : "null";
+      dlog("tray-state-on-wake", { reason, state });
+      if (!tray || tray.isDestroyed()) {
+        createTray();
+        console.error("[main] tray recreated after " + reason + " (was " + state + ")");
+      } else {
+        tray.setImage(makeTrayIcon(getCurrentLanguage()));
+      }
+    } catch (err) {
+      console.error("[main] tray re-assert failed:", err && err.message);
+    }
     if (dictationWindow && !dictationWindow.isDestroyed()) {
       dictationWindow.webContents.send("dictation:rebuild-capture", reason);
     }
@@ -1498,6 +1603,17 @@ function rebuildTrayMenu() {
       checked: app.getLoginItemSettings().openAtLogin,
       click: (/** @type {import("electron").MenuItem} */ item) => {
         app.setLoginItemSettings({ openAtLogin: item.checked });
+      }
+    },
+    {
+      // Manual mic recovery without touching a terminal: forces the renderer to
+      // probe for a live input and rebind. The app heals itself automatically,
+      // but this is here for reassurance / the rare case it's still acting up.
+      label: "Restart microphone",
+      click: () => {
+        if (dictationWindow && !dictationWindow.isDestroyed()) {
+          dictationWindow.webContents.send("dictation:rebuild-capture", "manual");
+        }
       }
     },
     {

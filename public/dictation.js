@@ -99,6 +99,37 @@ const SILENCE_PEAK = Number(window.DICTATION_SILENCE_PEAK || 0.01);
 // the user choosing silence repeatedly. Warn + rebuild on the next press.
 const SILENT_STREAK_LIMIT = 3;
 
+// --- Live-device selection + active recovery ---------------------------------
+// The fragility this fixes: getUserMedia with no deviceId binds to the macOS
+// *default* input. On a machine with virtual mics (VR, screen-share, meeting
+// apps), sleep/wake or a USB unplug can leave the default pointed at a device
+// that delivers pure digital silence — and the old code only rebuilt on the
+// NEXT key-press, often re-binding to the same dead default. So the user had to
+// physically replug the mic (forcing macOS to re-default to it) or restart the
+// app. Instead we now PROBE devices for a real signal and bind to a live one,
+// on our own, the moment the mic goes dead — no key-press required.
+let lastGoodDeviceId = null;  // deviceId of the last input that produced signal
+let currentDeviceId = null;   // deviceId the live graph is bound to right now
+let currentLabel = "";        // human label of that device (for the log)
+let liveProbePeak = 0;        // loudest frame seen since the last probe reset
+let recovering = false;       // an auto-recovery loop is in flight
+let recoveryMutedSeen = false;// a probed device existed but was muted (don't escalate)
+let deviceChangeTimer = null; // debounce for the noisy 'devicechange' burst
+// While set, a teardown+rebuild of the capture graph is in flight. A key-press
+// awaits it before its own initCapture so recovery and a press can never build
+// two graphs at once (stacked streams) or tear one down under the other.
+let captureBusy = null;
+// How long to listen for a real (non-zero) signal when probing a device. A live
+// mic clears 0 within a few worklet frames; a dead/virtual-silent one sits at 0.
+const PROBE_MS = Number(window.DICTATION_PROBE_MS || 500);
+// How many probe-and-rebind rounds the renderer tries before handing off to the
+// main process to escalate (reload the renderer, then relaunch the app).
+const MAX_PROBE_ROUNDS = Number(window.DICTATION_RECOVERY_ROUNDS || 5);
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function log(line) {
   const ts = new Date().toLocaleTimeString();
   logEl.textContent += `[${ts}] ${line}\n`;
@@ -286,7 +317,9 @@ function finalizeAndSend(text) {
 async function initCapture() {
   if (captureReady) return;
   try {
-    await buildCaptureGraph();
+    // Prefer the last device we got real audio from — on a machine with virtual
+    // mics, the bare system default can be a silent one.
+    await buildCaptureGraph(lastGoodDeviceId);
   } catch (err) {
     // Never leave a half-built graph behind: getUserMedia may have succeeded
     // before a later step threw, and that stray live track would keep the
@@ -297,34 +330,65 @@ async function initCapture() {
   }
 }
 
-async function buildCaptureGraph() {
+// Open a mic stream, optionally pinned to a specific device. A pinned device
+// that has since vanished (unplugged) throws OverconstrainedError/NotFoundError
+// — fall back to the system default rather than failing the whole build, and
+// forget the stale preference so we don't keep retrying a gone device.
+async function getMicStream(deviceId) {
+  const base = {
+    channelCount: 1,
+    echoCancellation: false,
+    noiseSuppression: false,
+    autoGainControl: false
+  };
+  if (deviceId) {
+    try {
+      return await navigator.mediaDevices.getUserMedia({ audio: { ...base, deviceId: { exact: deviceId } } });
+    } catch (err) {
+      const name = err && err.name;
+      if (name === "OverconstrainedError" || name === "NotFoundError") {
+        log("Preferred mic gone — falling back to system default");
+        if (lastGoodDeviceId === deviceId) lastGoodDeviceId = null;
+      } else {
+        throw err;
+      }
+    }
+  }
+  return await navigator.mediaDevices.getUserMedia({ audio: base });
+}
+
+async function buildCaptureGraph(deviceId = null) {
   audioContext = audioContext || new AudioContext();
   if (audioContext.state === "suspended") await audioContext.resume();
 
-  // Re-acquire onto the current default device whenever the audio device set
-  // changes (unplug, switch, BT connect). We don't rebuild here — that could
-  // land mid-hold — just mark the warm pipeline stale so the next press does.
+  // Re-acquire whenever the audio device set changes (unplug, switch, BT
+  // connect). Mid-hold we only mark stale (a rebuild would abandon the user's
+  // audio); idle we actively recover so a dead default fixes itself with no
+  // key-press. Debounced — macOS fires a burst of these per change.
   if (!deviceChangeWired && navigator.mediaDevices?.addEventListener) {
     deviceChangeWired = true;
     navigator.mediaDevices.addEventListener("devicechange", () => {
       captureStale = true;
-      log("Audio devices changed — mic re-acquires on next press");
+      log("Audio devices changed");
+      clearTimeout(deviceChangeTimer);
+      deviceChangeTimer = setTimeout(() => {
+        if (!isRecording && !recovering) recoverMic("devicechange");
+      }, 800);
     });
   }
 
-  mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      echoCancellation: false,
-      noiseSuppression: false,
-      autoGainControl: false
-    }
-  });
+  mediaStream = await getMicStream(deviceId);
 
   // The stream is bound to this one device. If the OS drops it (ended) or
   // another app seizes it (mute), tear down so the next press rebuilds, and
   // surface a visible warning instead of silently typing nothing.
   const [track] = mediaStream.getAudioTracks();
+  currentLabel = (track && track.label) || "(unknown input)";
+  // The deviceId we actually got (the OS may resolve "default" to a concrete
+  // device) — remembered as last-good so recovery can re-pin it first.
+  try { currentDeviceId = (track && track.getSettings && track.getSettings().deviceId) || deviceId || null; }
+  catch { currentDeviceId = deviceId || null; }
+  log("Capture bound to: " + currentLabel);
   if (track) {
     track.onended = () => handleMicLost("The microphone was disconnected.");
     track.onmute = () => handleMicLost("The microphone went silent — another app may have taken it.");
@@ -356,6 +420,10 @@ async function buildCaptureGraph() {
     while (prerollBytes > PREROLL_MAX_BYTES && prerollChunks.length > 1) {
       prerollBytes -= prerollChunks.shift().byteLength;
     }
+    // Always track the loudest frame for liveness probing — this runs whether or
+    // not we're recording, so a background probe can tell a live device (peak
+    // climbs above 0 within a few frames) from a dead/silent one (stays 0).
+    if (typeof peak === "number" && peak > liveProbePeak) liveProbePeak = peak;
     // Stream while actively recording AND during the post-release tail drain, so
     // the last word(s) the worklet hadn't yet delivered still reach the engine.
     if (!isRecording && !draining) return;
@@ -439,43 +507,148 @@ function handleMicLost(reason) {
   }
   socket = null;
   window.dictationBridge.sendMicWarning(reason);
+  // Don't just wait for the next key-press to retry — heal in the background so
+  // the mic is live again before the user presses. (No-op if already recovering
+  // or a hold is in progress.)
+  recoverMic("mic-lost");
 }
 
-// Proactively rebuild the whole capture pipeline. Driven by main on system wake
-// (powerMonitor resume / unlock), the moment the mic is most likely to have gone
-// dead — so the FIRST dictation after sleep works instead of being the silent
-// one that trips the recovery. A no-op rebuild mid-hold would abandon the user's
-// audio, so if a hold is in progress we just mark it stale and let the next
-// press rebuild.
-// A wake from sleep usually fires BOTH powerMonitor resume and unlock-screen
-// back-to-back, so this can be called twice in the same tick. Coalesce them:
-// two overlapping rebuilds would race the AudioContext close/recreate and could
-// leak a stream or leave a half-built (silent) graph — the very wedge we're
-// fixing. One in-flight rebuild is shared by concurrent callers.
-let rebuildInFlight = null;
-async function rebuildCapture(reason) {
-  if (isRecording) {
+// Listen for a real signal on the currently-built capture for up to `ms`.
+// Returns true if any frame rose above pure digital silence — a live mic clears
+// 0 within a few worklet frames; a dead/virtual-silent device sits exactly at 0.
+async function probeLive(ms) {
+  if (!captureReady) return false;
+  liveProbePeak = 0;
+  await sleep(ms);
+  return liveProbePeak > 0;
+}
+
+// Devices to try, in priority order: the last input that gave us real audio,
+// then the system default, then every other input. The liveness probe weeds out
+// the silent ones — more robust than guessing "virtual" from device names.
+async function candidateDeviceIds() {
+  const ids = [];
+  if (lastGoodDeviceId) ids.push(lastGoodDeviceId);
+  ids.push(null); // system default
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    for (const d of devices) {
+      if (d.kind !== "audioinput") continue;
+      const id = d.deviceId;
+      if (!id || id === "default" || id === "communications") continue;
+      if (!ids.includes(id)) ids.push(id);
+    }
+  } catch {}
+  return ids;
+}
+
+// Build a capture graph bound to a device that is actually producing audio.
+// Probes the existing graph first (a benign devicechange shouldn't tear down a
+// working mic), then each candidate device until one passes the liveness probe.
+// Returns true on success (graph left live and warm), false if nothing produced
+// a signal — the caller then escalates.
+async function ensureLiveCapture() {
+  recoveryMutedSeen = false;
+  if (captureReady && await probeLive(PROBE_MS)) {
+    lastGoodDeviceId = currentDeviceId || lastGoodDeviceId;
+    return true;
+  }
+  const candidates = await candidateDeviceIds();
+  for (const deviceId of candidates) {
+    // A key-press that arrived mid-recovery takes priority — bail so we don't
+    // tear down or stack a graph under the press's own initCapture.
+    if (isRecording || startInFlight) return false;
+    captureBusy = (async () => {
+      teardownCapture(true);
+      await buildCaptureGraph(deviceId); // resumes a suspended context itself
+    })();
+    try {
+      await captureBusy;
+    } catch (error) {
+      log("Probe build failed: " + (error && error.message));
+      continue;
+    } finally {
+      captureBusy = null;
+    }
+    if (await probeLive(PROBE_MS)) {
+      lastGoodDeviceId = currentDeviceId || deviceId || lastGoodDeviceId;
+      log("Mic live on: " + currentLabel);
+      return true;
+    }
+    // Silent — but is this device merely muted (a real mic with its switch off
+    // / OS-muted) rather than dead? Check the track WE JUST BUILT, while
+    // mediaStream still points at this candidate (not the last one after the loop).
+    if (currentTrackMuted()) {
+      recoveryMutedSeen = true;
+      log("Muted device: " + currentLabel);
+    }
+    log("No signal from: " + currentLabel + " — trying next input");
+  }
+  return false;
+}
+
+// Heal the mic in the background, with no key-press needed. Probe-and-rebind in
+// a loop with backoff; if nothing produces a signal after a few rounds, hand off
+// to the main process to escalate (reload the renderer, then — as a last resort
+// — relaunch the app to clear a wedged audio service). Coalesced (one loop at a
+// time) and deferred while a hold is in progress so it can't abandon live audio.
+// Also serves the system-wake path (main sends "resume"/"unlock-screen").
+async function recoverMic(reason) {
+  if (isRecording || startInFlight) {
     captureStale = true;
-    log("Rebuild requested mid-hold (" + (reason || "") + ") — deferring to next press");
+    log("Recovery deferred — a hold is in progress (" + (reason || "") + ")");
     return;
   }
-  if (rebuildInFlight) return rebuildInFlight;
-  rebuildInFlight = (async () => {
-    log("Rebuilding capture proactively (" + (reason || "wake") + ")");
-    teardownCapture(true);
-    silentStreak = 0;
-    captureStale = false;
-    try {
-      await initCapture();
-      if (audioContext && audioContext.state === "suspended") await audioContext.resume();
-      log("Capture rebuilt after " + (reason || "wake"));
-    } catch (error) {
-      // Leave NOTHING half-built; the next press's initCapture tries again.
-      teardownCapture(true);
-      log("Proactive rebuild failed: " + (error && error.message));
+  if (recovering) return;
+  recovering = true;
+  log("Mic auto-recovery started (" + (reason || "") + ")");
+  try {
+    let round = 0;
+    while (!isRecording && !startInFlight) {
+      round += 1;
+      let live = false;
+      try { live = await ensureLiveCapture(); }
+      catch (error) { log("Recovery round error: " + (error && error.message)); }
+      // A key-press took over while we were probing — let it run the show.
+      if (isRecording || startInFlight) return;
+      if (live) {
+        silentStreak = 0;
+        captureStale = false;
+        setStatus("Ready");
+        log("Mic recovered (round " + round + ") on " + currentLabel);
+        window.dictationBridge.sendMicRecovered();
+        return;
+      }
+      // A device that exists but is MUTED (hardware switch, OS mute, or another
+      // app holding it) reads as silent too — but recovery can't un-mute it, and
+      // restarting the app over a deliberately-muted mic would be maddening. The
+      // flag is set inside the probe loop against the actual muted device (not
+      // the last candidate tried). Tell the user to unmute instead of escalating.
+      if (recoveryMutedSeen) {
+        log("Mic appears muted — warning instead of escalating");
+        window.dictationBridge.sendMicWarning("Your microphone is muted — unmute it (the device switch, or System Settings → Sound → Input).");
+        return;
+      }
+      if (round >= MAX_PROBE_ROUNDS) {
+        log("Mic still silent after " + round + " rounds — escalating to main");
+        window.dictationBridge.requestEscalation(reason || "recovery");
+        return;
+      }
+      await sleep(Math.min(6000, 750 * 2 ** (round - 1)));
     }
-  })();
-  try { await rebuildInFlight; } finally { rebuildInFlight = null; }
+  } finally {
+    recovering = false;
+  }
+}
+
+// True if the live capture's track exists but is currently muted (delivering no
+// data on purpose) — distinct from a device that's silent because it's virtual
+// or wedged. A live mic in a quiet room is NOT muted (it streams a noise floor).
+function currentTrackMuted() {
+  try {
+    const track = mediaStream && mediaStream.getAudioTracks && mediaStream.getAudioTracks()[0];
+    return !!(track && track.readyState === "live" && track.muted);
+  } catch { return false; }
 }
 
 async function startRecording(profile) {
@@ -483,6 +656,9 @@ async function startRecording(profile) {
   startInFlight = true;
   stopRequested = false;
   holdStartedAt = Date.now();
+  // If recovery is mid-rebuild, wait it out — it sees startInFlight and stops
+  // after this build, so we won't race it into a second (stacked) graph.
+  if (captureBusy) { try { await captureBusy; } catch {} }
   // A new press during the previous utterance's tail drain supersedes it: cancel
   // the pending commit so this fresh recording's frames aren't committed early.
   if (draining) { clearTimeout(drainTimer); draining = false; }
@@ -646,6 +822,10 @@ function finishUtterance() {
     return;
   }
 
+  // This hold produced real audio, so the device it's bound to is good —
+  // remember it as the one to re-pin first if the mic ever needs recovery.
+  if (currentDeviceId) lastGoodDeviceId = currentDeviceId;
+
   // Leave the capture pipeline warm for the next press — only stop streaming.
 
   if (socket && socket.readyState === WebSocket.OPEN) {
@@ -692,7 +872,7 @@ window.dictationBridge.onStop(() => {
   }
   stopRecording();
 });
-window.dictationBridge.onRebuildCapture((reason) => rebuildCapture(reason));
+window.dictationBridge.onRebuildCapture((reason) => recoverMic(reason));
 
 function arrayBufferToBase64(buffer) {
   return u8ToBase64(new Uint8Array(buffer));
@@ -716,6 +896,8 @@ log("Dictation worker loaded");
 // muted (not recording) until a press, so this only pre-loads — it doesn't
 // start capturing speech. A failure here (mic blocked/in use) is non-fatal:
 // the next press just falls back to the original lazy path.
-initCapture()
-  .then(() => log("Capture pre-warmed at startup"))
-  .catch((error) => log("Startup pre-warm skipped: " + (error?.message || error)));
+// Probe for a live device at startup so a freshly-launched renderer (including
+// one main just reloaded to recover the mic) lands on a working input. Routed
+// through recoverMic so it shares the same single-loop / press-deferral guards
+// as every other trigger — no bare build that could race an early mic-loss.
+recoverMic("startup");
