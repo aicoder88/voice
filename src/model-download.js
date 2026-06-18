@@ -139,6 +139,11 @@ export async function ensureModel(name, modelsDir, opts = {}) {
  * @param {string} binDir
  * @param {{ onProgress?: (p: { received: number, total: number, fraction: number|null }) => void, signal?: AbortSignal }} [opts]
  */
+// Escape a path for safe interpolation into a single-quoted PowerShell literal:
+// inside '...' the only special char is the single quote, escaped by doubling it.
+// A no-op for ordinary paths; fixes accounts whose username contains an apostrophe.
+const psq = (p) => String(p).replace(/'/g, "''");
+
 export async function ensureWindowsBinaries(variant, binDir, opts = {}) {
   const cli = join(binDir, "whisper-cli.exe");
   if (existsSync(cli)) return cli;
@@ -150,7 +155,7 @@ export async function ensureWindowsBinaries(variant, binDir, opts = {}) {
   const nested = join(binDir, "Release");
   if (existsSync(nested)) {
     await runPowerShell(
-      `Move-Item -Force (Join-Path '${nested}' '*') '${binDir}'; Remove-Item -Recurse -Force '${nested}'`
+      `Move-Item -Force (Join-Path '${psq(nested)}' '*') '${psq(binDir)}'; Remove-Item -Recurse -Force '${psq(nested)}'`
     );
   }
   try { unlinkSync(zip); } catch {}
@@ -160,7 +165,7 @@ export async function ensureWindowsBinaries(variant, binDir, opts = {}) {
 
 /** Expand a .zip into a directory via PowerShell (Windows). */
 function extractZipWindows(zipPath, destDir) {
-  return runPowerShell(`Expand-Archive -Path '${zipPath}' -DestinationPath '${destDir}' -Force`);
+  return runPowerShell(`Expand-Archive -Path '${psq(zipPath)}' -DestinationPath '${psq(destDir)}' -Force`);
 }
 
 /** Run a PowerShell one-liner, rejecting on a non-zero exit. */

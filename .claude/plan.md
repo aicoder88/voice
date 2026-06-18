@@ -1,4 +1,37 @@
-# GVoice full-review fix pass — 2026-06-10 (pt.2)
+# Polish pass — 2026-06-17 (CURRENT)
+
+Goal: find mistakes, omissions, polish; fix high-value confirmed ones. App is stable
+and running in /Applications — precision over volume; surface risky internal refactors
+instead of silently changing them.
+
+Baseline (clean tree @ 95b87ef): Unit 110/110, Parity 4 pass + 1 known skip, Cleanup 9/9.
+Tests cover only PURE modules — nothing in main.js/IPC/FFI/paste; treat fixes there conservatively.
+
+Method: 9-dimension review workflow (dictation-core, relay-providers, resource-lifecycle,
+security-ipc, crossplatform-ffi, ux-copy, simplification-deadcode, docs-accuracy,
+vocab-cleanup-data) → adversarial verify each finding → triage by value×confidence÷blast-radius.
+
+STATUS (2026-06-17): DONE. 35 confirmed findings fixed across 5 tested batches + review gate
+applied (2 should-fix + 2 nits). 4 surfaced for the user (#2 relay auth, #3 full-async, #8/#11/#15).
+Tests: unit 110/110, parity 4 + 1 known skip, cleanup 9/9. NOT committed, NOT shipped (awaiting user).
+Full state in .claude/continuation.md; decisions in .claude/notes.md; findings in .claude/review-findings-2026-06-17.md.
+
+## Cross-reference: prior-pass PENDING items I confirmed still OPEN (2026-06-17)
+- package.json: no `"test"` alias (trivial). [4f]
+- scripts/unit/dictation-session.test.js: file does not exist. [4d]
+- benchmark-run.js:103 postWav() fetch has NO timeout → wedged whisper-server pins
+  the Settings "Testing speed…" UI forever. [1b]
+- hardware.js probeCapability(): NOT memoized — runs execFileSync wmic (4s) + PowerShell
+  fallback synchronously on the MAIN process at every Settings-open/benchmark. [2]
+- benchmark-run.js finally (90-94): restores WHISPER_MODEL but never stops the benchmark
+  whisper-server nor clears WHISPER_SERVER_URL → if dictating on whisper-local while
+  benchmarking a different model, next dictation can use the benchmark server/model; also a
+  process leak until restart. [1a — verify scope w/ workflow]
+DONE since June 10 (verified): settings.html error surfacing (showEngineError, !res.ok guard).
+
+---
+
+# GVoice full-review fix pass — 2026-06-10 (pt.2) — HISTORICAL (prior pass)
 
 Source: 63-agent review (41 confirmed findings, 4 refuted, 36 lows).
 Full results JSON: /private/tmp/claude-501/-Users-macmini-dev-voice/45579cbf-db29-42e4-bc8b-12c7ceed7f02/tasks/wvcj36kgr.output

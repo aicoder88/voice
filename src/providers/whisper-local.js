@@ -15,7 +15,7 @@ import { writeFile, unlink, mkdtemp, readFile } from "node:fs/promises";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sendToClient, wrapWav } from "./_shared.js";
 import { withRetry, httpError } from "../retry.js";
@@ -199,6 +199,13 @@ async function resolvePrompt() {
 let whisperServerProc = null;
 /** @type {Promise<void> | null} */
 let whisperServerReady = null;
+/** Resolved model path the running server was started with (for cache-hit checks). */
+let whisperServerModel = null;
+// Bumped on every (re)spawn decision. An in-flight start captures this value and
+// bails if a newer start supersedes it — otherwise two rapid different-model
+// starts each spawn, orphaning the first server (its proc handle is overwritten,
+// so nothing reaps it) and racing to publish WHISPER_SERVER_URL last-writer-wins.
+let whisperServerGeneration = 0;
 let exitHandlerInstalled = false;
 
 // Records the PID of the whisper-server we spawned, so the NEXT app launch can
@@ -273,6 +280,7 @@ export function stopWhisperServer() {
   const proc = whisperServerProc;
   whisperServerProc = null;
   whisperServerReady = null;
+  whisperServerModel = null;
   try { if (existsSync(PID_FILE)) unlinkSync(PID_FILE); } catch {}
   if (!proc || proc.killed || proc.pid == null) return;
   const pid = proc.pid;
@@ -282,8 +290,6 @@ export function stopWhisperServer() {
 }
 
 export function ensureWhisperServer(bin, modelPath) {
-  if (whisperServerReady) return whisperServerReady;
-
   // Replace the trailing "-cli" (with optional .exe suffix on Windows) with
   // "-server". Previous regex (/-cli$/) missed the .exe case and ended up
   // spawning whisper-cli.exe with server-style flags, which printed help and
@@ -293,15 +299,37 @@ export function ensureWhisperServer(bin, modelPath) {
   // and CLI can never run different models. The last-resort default is
   // resolved against this file, not cwd (which varies by launch method).
   const model = modelPath || process.env.WHISPER_MODEL || join(__dirname, "..", "..", "models", "ggml-small.en-q5_1.bin");
+  // Normalize before comparing: "./models/x" and an absolute "<root>/models/x"
+  // name the same file, so a naive string compare would respawn spuriously.
+  const resolvedModel = resolve(model);
+
+  // Reuse the warm server only if it's running the SAME model. A model switch
+  // (Settings "Use on-device" with a different model, or a benchmark on another
+  // model) must respawn — otherwise the cached promise would keep serving the
+  // old model and dictation would silently transcribe with the wrong one.
+  if (whisperServerReady) {
+    if (whisperServerModel === resolvedModel) return whisperServerReady;
+    stopWhisperServer();
+  }
+  whisperServerModel = resolvedModel;
+  const myGeneration = ++whisperServerGeneration;
 
   whisperServerReady = (async () => {
     // Clean up a server orphaned by a previous crash/force-quit, then take a
     // fresh free port so nothing left on the old port can wedge this start.
     await reapStaleServer();
+    // A newer start arrived while we awaited above (rapid model switch / an
+    // overlapping benchmark): stop here. Spawning now would overwrite
+    // whisperServerProc and leave that newer server's process unreaped.
+    if (myGeneration !== whisperServerGeneration) {
+      throw new Error("whisper-server start superseded before spawn");
+    }
     const port = process.env.WHISPER_PORT || String(await getFreePort());
     const baseUrl = `http://127.0.0.1:${port}`;
     const args = [
-      "-m", model,
+      // Spawn on the resolved (absolute) path — the same value we keyed the
+      // cache on — so the -m arg never depends on the child's cwd.
+      "-m", resolvedModel,
       "--host", "127.0.0.1",
       "--port", port,
       "-t", "4",
@@ -369,6 +397,13 @@ export function ensureWhisperServer(bin, modelPath) {
     }
 
     await waitForServer(baseUrl, 10000, () => spawnError || (whisperServerProc === null ? new Error("whisper-server died before ready") : null));
+    // Superseded while we were booting: don't publish our URL (it would clobber
+    // the newer start's, last-writer-wins) and kill our own process so it can't
+    // linger as an orphan on its port.
+    if (myGeneration !== whisperServerGeneration) {
+      try { thisProc.kill("SIGKILL"); } catch {}
+      throw new Error("whisper-server start superseded after spawn");
+    }
     // Publish the URL only once the server actually answers: a commit landing
     // during the boot window would otherwise POST at a dead port, burn the
     // retry, and drop to the slow CLI even though the server was seconds away.

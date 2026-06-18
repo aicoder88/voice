@@ -1,54 +1,54 @@
-# Continuation — GVoice full-review fix pass (paused 2026-06-10 night)
+# Continuation — GVoice polish pass (2026-06-17)
 
 ## Where things stand
-Two passes happened today on top of commit fc5e3a5:
+Ran a 9-dimension find→adversarially-verify review workflow (60 agents): 39 confirmed
+findings (0 critical, 0 high, 7 medium, 32 low), 12 refuted. Then applied the high-value
+confirmed fixes in 5 batches, each tested. NOT committed, NOT shipped (waiting on user).
 
-1. **Morning polish pass — SHIPPED.** Commit 3cb9cb9 (auto-language pick fix,
-   loopback-only relay, settings cleanup default, dead setup.html). Built and
-   installed to /Applications/GVoice.app — **that build is what's running now;
-   it's stable.**
+Tests after all batches: unit 110/110, parity 4 pass + 1 known network skip, cleanup 9/9.
 
-2. **Full-review fix pass — CODE DONE & COMMITTED, NOT SHIPPED.** A 63-agent
-   review produced 41 confirmed findings (+36 lows). Roughly 80% are fixed and
-   committed (see "DONE" in .claude/plan.md). Tests: 105/105 unit, 4/5 parity
-   (the 1 skip is the pre-existing OpenAI network skip).
-   The /Applications build does NOT include these fixes yet — shipping is the
-   last step, after the pending items below.
+## Fixed this pass (by finding #)
+- Batch A (zero-risk docs/config/dead-code/copy): #4 #5 #6 #12 #20 #21 #22 #23 #26 #27 #28 #29 #30 #31 #32 #33 #34 #35 #36 #37
+- Batch B (contained robustness/hardening): #7 #9 #10 #16 #17 #18 #19 #24 #25 #38
+- Batch C (whisper-server lifecycle): #1 #14
+- Batch D (bad-OpenAI-key surfacing): #0
+- Batch E (GPU probe): #3 (memoize; async full-fix surfaced, not done — Windows-only/untestable here)
 
-## What's left (impact order — full details in .claude/plan.md "PENDING")
-1. settings.html: REQUIRED follow-up to a committed change — engine:apply can
-   now return { error } and the renderer doesn't display it; also the failed-
-   benchmark panel still offers "Use on-device", plus 3 copy fixes.
-2. benchmark-run.js: stop the benchmark whisper-server in finally (else live
-   dictation silently switches to the benchmark model); add a fetch timeout.
-3. hardware.js: memoize probeCapability (sync PowerShell blocks main process).
-4. Tests: parity bad-key restore-order fix; cleanup-test exit code;
-   recordings.test basename; NEW dictation-session.test.js; mic-health holdMs
-   cases; package.json "test" alias.
-5. Review gate (adversarial + simplicity) over the whole uncommitted-pass diff
-   (`git diff 3cb9cb9..HEAD`), then full tests.
-6. Ship: pnpm build → swap /Applications/GVoice.app → relaunch → smoke test
-   (dictate; pill buttons clickable, margins click-through; sleep→wake).
+## #2 relay auth — DONE (user chose Origin check over token)
+- realtime-relay.js: default-deny cross-origin WS upgrades; allow loopback origins + missing-Origin
+  (native clients). New `allowedOrigins` option (["*"] or exact list) for cross-origin reuse.
+  Browsers can't forge Origin, so this blocks the "malicious website spends your key" threat with
+  ZERO change to the dictation path. Tested: new parity case (cross-origin rejected, loopback+none
+  accepted) + verified on the LIVE dev app. RELAY_PROTOCOL.md documents it.
 
-## Sharp edges to know before resuming
-- main.js engine:apply now returns { error: string } when the model file is
-  missing — settings.html MUST be taught to show it (pending item 1) or a
-  failed apply looks like a silent success in the UI. This is the only
-  committed change with a loose end.
-- The pill click-through rework (pill:set-interactive IPC, forward:true) is
-  committed but has NOT been manually tested in a live app — verify the
-  Copy/Open buttons still click during the smoke test.
-- whisper-local exit-handler reset is guarded by `whisperServerProc ===
-  thisProc` — don't "simplify" the guard away; late exits from replaced
-  children would clobber the successor's state.
-- settings.js now single-quotes spaced values (dotenv reads them literally);
-  double quotes would expand \n in Windows paths. Tests pin this.
-- The full review-findings JSON lives in /private/tmp/... (may not survive a
-  reboot) — but plan.md restates every pending item self-contained.
+## LIVE SMOKE TEST — passed (2026-06-17/18)
+Quit installed app → launched dev build → verified, then restored installed app:
+- Boots clean (all main.js edits, web-contents guard, dialog import, engine guards — no crash).
+- Relay up + serves dictation.html (HTTP 200); global hotkeys active (uiohook loaded); mic live.
+- whisper-server warmed at boot → exercised #1/#14 ensureWhisperServer restructure LIVE, succeeded.
+- #2 Origin gate on live relay: loopback ACCEPTED, cross-origin REJECTED, no-origin ACCEPTED.
+- End-to-end transcription through live relay: connected+completed frames (empty transcript = correct
+  for the tone fixture; silence gate refused to hallucinate).
+- Clean quit reaped the whisper-server child (before-quit→stopWhisperServer worked). Installed app restored.
+- NOT exercised live (needs a held key + speech + focused field): the physical hold→speak→paste loop
+  and the dictation.js renderer frame-handling (#0 bad-key msg, #7 guards) — verified by reasoning + the adversarial gate.
 
-## Key files touched in the unshipped pass
-main.js, src/hotkey.js, src/dictation-session.js, src/foreground.js,
-src/typing.js, src/settings.js, src/cleanup.js, src/history.js,
-src/correction-watch.js, src/providers/{whisper-local,deepgram,openai}.js,
-realtime-relay.js, server.js, public/{dictation.js,mic-health.js,pill.html},
-preload-pill.cjs, scripts/unit/settings.test.js, all 5 docs (agent pass).
+## Surfaced, NOT changed (verifier said leave)
+- #8  worklet tail-flush — verifier: proposed fix doesn't work, would reorder load-bearing commit lifecycle. Leave.
+- #11 losing Deepgram leg not closed — low payoff, lifecycle risk. Leave.
+- #15 relay/WS not closed on quit — OS reaps socket on exit; no real leak. Leave.
+- #3-async the full async GPU-probe fix (removes even the first-call block) — Windows-only, can't test here.
+
+## Known follow-ups (prior-plan items still open, NOT done this pass)
+- parity test "openai bad-key" (item 4a): restores the key before connect, so it can never fail → always skips.
+  Fixing it (keep bad key until after the assertion) would actually exercise the #0 relay path. Network-dependent.
+- NEW scripts/unit/dictation-session.test.js (4d); package.json "test" alias (4f); mic-health holdMs cases (4e).
+
+## Key files touched
+main.js, public/dictation.js, src/providers/{whisper-local,deepgram}.js, src/{vocab,cleanup,hardware,model-download,settings,foreground,bootstrap-env}.js,
+public/{settings,dictionary,pill}.html, public/realtime-voice-agent{.js,/template.js}, scripts/cleanup-test.js,
+README.md, SETUP.md, docs/ARCHITECTURE.md, .env.example, pnpm-workspace.yaml.
+
+## Review docs
+- .claude/review-findings-2026-06-17.md — all 39 confirmed + 12 refuted, full detail.
+- .claude/triage-2026-06-17.md — fix-vs-surface decisions.

@@ -6,6 +6,7 @@ The protocol is deliberately shaped to look like a subset of the OpenAI Realtime
 
 ## Connection
 
+- **Origin gating.** The relay spends the user's API keys, so by default it accepts an upgrade only from an app-local (loopback) `Origin` — or from a client that sends no `Origin` at all (native tools; a browser always sends one and cannot forge it). This blocks a random web page the user visits from opening a session on their key. A cross-origin deployment of the reusable relay passes `attachRealtimeRelay({ allowedOrigins: [...] })` (exact origin strings, or `["*"]`).
 - URL: `ws://<host>/realtime` (path configurable via `attachRealtimeRelay({ path })`)
 - Query parameters:
   - `provider` — `openai` | `deepgram` | `whisper-local` (alias: `local`). Default: `STT_PROVIDER` env or `openai`.

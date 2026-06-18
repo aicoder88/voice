@@ -18,6 +18,9 @@ let alreadyFinalized = false;
 // Per-press profile from main: { language, model } for Deepgram (right-Ctrl
 // toggles hr/en). null = use the URL-default behavior. Read by ensureSocket.
 let activeProfile = null;
+// Which engine the current socket is talking to. Set in ensureSocket; read when
+// deciding whether an upstream close means "your key is bad" (OpenAI only).
+let activeProvider = "openai";
 
 // Full audio of the current utterance (pre-roll + everything streamed while
 // recording), kept as a list of Uint8Array PCM16 chunks. Shipped to the main
@@ -28,7 +31,11 @@ let recordedChunks = [];
 let recordedBytes = 0;
 // True once a terminal frame (transcript OR a server-decided empty) arrives.
 // Distinguishes a real failure (nothing ever came back) from legitimate
-// silence (the relay returns an empty `completed` frame on purpose).
+// silence (the relay returns an empty `completed` frame on purpose). Redundant
+// with (alreadyFinalized || failureHandled) today, but kept as a deliberate
+// belt-and-suspenders: this is untested async code and the redundancy rests on
+// a cross-branch invariant nothing enforces (a future terminal path that sets
+// neither flag would silently break failure detection). See .claude/notes.md.
 let gotTerminalEvent = false;
 // One-shot guard so a single failed utterance produces at most one pop-up.
 let failureHandled = false;
@@ -153,6 +160,7 @@ async function ensureSocket() {
 
   return new Promise((resolve, reject) => {
     const provider = (new URLSearchParams(window.location.search).get("provider") || window.STT_PROVIDER || "openai").toLowerCase();
+    activeProvider = provider;
     // For the OpenAI path we request the dictation-flavored transcription-only
     // model. The relay reads ?model=, switches the upstream session into
     // STT-only shape, and sends its own session.update on open — we do not
@@ -228,7 +236,7 @@ function handleRealtimeEvent(msg) {
     if (finalText && finalText.trim()) {
       lastFinalAt = Date.now();
       finalizeAndSend(finalText.trim());
-    } else if (!alreadyFinalized) {
+    } else if (!alreadyFinalized && !failureHandled) {
       // Terminal frame with no text. Two cases:
       //  - We captured real audio: a genuine attempt that came back empty
       //    (mis-recognition, both auto-language legs silent, a flush race). Hand
@@ -247,7 +255,27 @@ function handleRealtimeEvent(msg) {
     return;
   }
 
+  if (t === "local.status" && msg.status === "closed") {
+    // The upstream transcriber closed the connection. After a transcript (or any
+    // terminal frame) this is just the socket winding down — ignore it. But a
+    // close with NOTHING ever sent back, on the OpenAI path, almost always means
+    // the API key was rejected — and today that surfaces as a vague "lost the
+    // connection" on every dictation, a dead end with no hint of the real cause.
+    // (Deepgram/whisper-local report their own failures via local.error, and
+    // Deepgram's closed frame has benign mid-hold cases, so we don't treat their
+    // closes as failures here.)
+    if (activeProvider === "openai" && !alreadyFinalized && !gotTerminalEvent && !failureHandled) {
+      const why = msg.reason || (msg.code ? "closed " + msg.code : "");
+      reportFailure("Lost the connection to OpenAI before it answered — if this keeps happening, check that your API key is valid." + (why ? " (" + why + ")" : ""));
+    }
+    return;
+  }
+
   if (t === "error" || t === "local.error") {
+    // At most one terminal outcome per utterance, whatever the frame order. If a
+    // transcript already went out (or an empty terminal frame closed this one),
+    // a trailing error must not repaint a red pill over a dictation that landed.
+    if (alreadyFinalized || gotTerminalEvent || failureHandled) return;
     log("Error: " + JSON.stringify(msg));
     // Action first; the technical detail rides along for the curious (and is
     // always in the log).
@@ -294,7 +322,9 @@ function reportFailure(reason) {
 }
 
 function finalizeAndSend(text) {
-  if (alreadyFinalized) return;
+  // failureHandled guard: a delayed `completed` after an error already reported
+  // must not paste a transcript into a field the user has moved on from.
+  if (alreadyFinalized || failureHandled) return;
   if (!text || !text.trim()) return;
   alreadyFinalized = true;
   clearFailureTimer();

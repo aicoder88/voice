@@ -157,6 +157,31 @@ test("parity: relay boots and serves /realtime", async (t) => {
   assert.ok(relay.port > 0, "ephemeral port assigned");
 });
 
+test("parity: relay rejects a cross-origin upgrade, accepts loopback + no-origin", async (t) => {
+  if (!process.env.OPENAI_API_KEY) {
+    t.skip("OPENAI_API_KEY required even for boot (relay constructor enforces it)");
+    return;
+  }
+  const relay = await bootRelay();
+  t.after(() => relay.close());
+  const url = `ws://127.0.0.1:${relay.port}/realtime?provider=openai&model=gpt-realtime-whisper`;
+
+  // "open" = relay accepted the upgrade (the client↔relay socket opened, before
+  // any upstream call); "rejected" = the relay destroyed the socket on Origin.
+  const tryOrigin = (origin) =>
+    new Promise((resolve) => {
+      const ws = new WebSocket(url, origin ? { headers: { origin } } : undefined);
+      const settle = (outcome) => { try { ws.close(); } catch {} resolve(outcome); };
+      ws.once("open", () => settle("open"));
+      ws.once("error", () => settle("rejected"));
+      setTimeout(() => settle("timeout"), 4000).unref();
+    });
+
+  assert.strictEqual(await tryOrigin("https://evil.example"), "rejected", "a cross-origin web page must be rejected");
+  assert.strictEqual(await tryOrigin(`http://127.0.0.1:${relay.port}`), "open", "the app's own loopback origin must be accepted");
+  assert.strictEqual(await tryOrigin(null), "open", "a native client with no Origin must be accepted");
+});
+
 test("parity: openai transcription-only completes one utterance", async (t) => {
   if (!process.env.OPENAI_API_KEY) {
     t.skip("OPENAI_API_KEY not set");

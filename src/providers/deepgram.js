@@ -31,6 +31,10 @@ export function attach(clientSocket, { apiKey, model, language }) {
   const multiLeg = langs.length > 1;
 
   let completedSent = false;
+  // The relay's wire contract emits "connected" once per session, but in auto/
+  // multi-language mode there are several legs — gate the synthesized frame so
+  // the client sees exactly one (the per-leg console log below stays per-leg).
+  let connectedSent = false;
   // Set when the browser commits (key released) and we ask Deepgram to flush.
   // Deepgram never sends a message of type "Finalize" back — it marks the
   // flushed result with from_finalize: true on a normal Results frame.
@@ -83,7 +87,10 @@ export function attach(clientSocket, { apiKey, model, language }) {
 
     dgSocket.on("open", () => {
       console.error("[relay] deepgram connected model=" + model + " lang=" + legLang);
-      sendToClient(clientSocket, { type: "local.status", status: "connected", provider: "deepgram", model });
+      if (!connectedSent) {
+        connectedSent = true;
+        sendToClient(clientSocket, { type: "local.status", status: "connected", provider: "deepgram", model });
+      }
       while (leg.queuedBinaries.length > 0) dgSocket.send(leg.queuedBinaries.shift());
       // A short tap can commit while this leg was still connecting — deliver
       // the Finalize it missed, right after the queued audio, so its flush
@@ -211,7 +218,14 @@ export function attach(clientSocket, { apiKey, model, language }) {
     });
   }
 
-  clientSocket.on("message", (message) => {
+  clientSocket.on("message", (message, isBinary) => {
+    // A genuine binary frame is raw PCM audio — forward it as-is to every leg.
+    // (The shipped client only sends JSON with base64 audio, so this is the
+    // documented contract for third-party clients, not a path GVoice exercises.)
+    if (isBinary) {
+      forwardBinary(message);
+      return;
+    }
     const payload = message.toString();
     let parsed;
     try { parsed = JSON.parse(payload); } catch {

@@ -119,3 +119,8 @@ const passed = results.filter((r) => r.pass).length;
 const total = results.length;
 const avgMs = Math.round(results.reduce((s, r) => s + r.ms, 0) / total);
 console.log(`\n=== summary: ${passed}/${total} pass — avg ${avgMs}ms ===\n`);
+
+// Exit non-zero on any failure so CI / pre-commit / a manual run actually fails
+// on a regression. (This harness calls a live LLM, so a case can occasionally
+// flake; re-run before treating a single red as a real regression.)
+process.exitCode = passed === total ? 0 : 1;

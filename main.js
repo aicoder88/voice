@@ -3,7 +3,7 @@
 // reads process.env (see src/bootstrap-env.js). Replaces the old
 // `import "dotenv/config"`, which only worked when launched from the repo dir.
 import "./src/bootstrap-env.js";
-import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification, clipboard, powerMonitor } from "electron";
+import { app, BrowserWindow, Tray, Menu, nativeImage, shell, ipcMain, screen, Notification, clipboard, powerMonitor, dialog } from "electron";
 
 // Brand the app as "GVoice" even when run unpackaged (otherwise the menu bar,
 // About panel, and userData folder all read "Electron"). Must run before the
@@ -48,7 +48,7 @@ import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEdit
 import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
 import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-local.js";
 import { ENV_FILE, MODELS_DIR, BIN_DIR } from "./src/bootstrap-env.js";
-import { writeEnvFile, settingsView, patchFromView } from "./src/settings.js";
+import { writeEnvFile, settingsView, patchFromView, VALID_PROVIDERS } from "./src/settings.js";
 import { probeCapability, recommendedAssets } from "./src/hardware.js";
 import { suggestBeforeBenchmark } from "./src/benchmark.js";
 import { runLocalBenchmark } from "./src/benchmark-run.js";
@@ -1183,8 +1183,7 @@ function setupIpc() {
   // A dictation couldn't be transcribed but audio was captured. Save the clip
   // and show the Error pill so the user can open the recording and try again.
   ipcMain.on("dictation:failure", async (_event, payload) => {
-    dictation.finalize();
-    dictation.done();
+    dictation.fail();
     const chunks = (payload && payload.chunks) || [];
     const recordingPath = await saveTempRecording(chunks, payload && payload.sampleRate);
     if (recordingPath) console.error("[main] dictation recording saved:", recordingPath);
@@ -1200,7 +1199,7 @@ function setupIpc() {
   });
 
   ipcMain.on("dictation:error", (_event, message) => {
-    dictation.done();
+    dictation.fail();
     console.error("Dictation error:", message);
     dlog("dictation-error", message);
     // No audio, no transcript (mic blocked, relay down, offline). Show the
@@ -1247,13 +1246,19 @@ function setupIpc() {
   ipcMain.handle("vocab:list", () => vocab.getTerms());
   ipcMain.handle("vocab:add-many", (_event, text) => {
     const parts = (Array.isArray(text) ? text : String(text || "").split(/[,\n]/));
-    let added = 0;
+    let added = 0, duplicate = 0, tooLong = 0;
     for (const part of parts) {
-      const word = String(part).trim();
-      if (word && vocab.addTerm(word)) added++;
+      // addTermResult owns validation (collapse-then-length, normalize), so the
+      // counts match what actually happened: an "invalid" entry (blank or
+      // punctuation-only) is skipped silently rather than miscounted.
+      switch (vocab.addTermResult(part)) {
+        case "added": added++; break;
+        case "duplicate": duplicate++; break;
+        case "too-long": tooLong++; break;
+      }
     }
-    dlog("vocab-add-many", { added });
-    return vocab.getTerms();
+    dlog("vocab-add-many", { added, duplicate, tooLong });
+    return { added, duplicate, tooLong, terms: vocab.getTerms() };
   });
   ipcMain.handle("vocab:remove", (_event, term) => {
     vocab.removeTerm(term);
@@ -1342,9 +1347,20 @@ function setupIpc() {
   // Commit the user's choice: which engine to use (and, for local, which model).
   ipcMain.handle("engine:apply", async (_event, payload) => {
     const provider = (payload && payload.provider) || "deepgram";
+    // Defense-in-depth: the renderer is trusted local content, but this value is
+    // persisted to .env and (for the model) becomes a child-process arg — keep
+    // both to known allow-lists so a stray value can't point the engine elsewhere.
+    if (!VALID_PROVIDERS.has(provider)) return { error: "Unknown engine." };
     /** @type {Record<string,string>} */
     const patch = { STT_PROVIDER: provider };
     if (provider === "whisper-local" && payload && payload.modelName) {
+      // modelName must be a bare allow-listed model key (this also rejects any
+      // path separator / "../" traversal, since those are never MODELS keys).
+      // Object.hasOwn, not a bracket truthy-check: a bare key like "constructor"
+      // would otherwise resolve up the prototype chain and slip the gate.
+      if (!Object.hasOwn(MODELS, payload.modelName)) {
+        return { error: "Unknown speech model." };
+      }
       const modelPath = join(MODELS_DIR, payload.modelName);
       // Never write a config pointing at a model that isn't on disk — a failed
       // download would otherwise brick every dictation until re-setup.
@@ -1375,7 +1391,7 @@ function setupIpc() {
   // app, or silent for several holds in a row) and rebuilt its capture. Make
   // the failure visible instead of silently typing nothing.
   ipcMain.on("dictation:mic-warning", (_event, message) => {
-    dictation.done();
+    dictation.fail();
     console.error("[main] mic warning:", message);
     dlog("mic-warning", message);
     // Show the reason ON the pill (not just a system notification the user may
@@ -1635,6 +1651,17 @@ function rebuildTrayMenu() {
       enabled: !!recordingsDir,
       click: async () => {
         if (!recordingsDir) return;
+        // One stray click otherwise wipes every saved clip — including the one
+        // backing a dictation that hasn't been recovered yet. Confirm first.
+        const { response } = await dialog.showMessageBox({
+          type: "warning",
+          buttons: ["Delete", "Cancel"],
+          defaultId: 1,
+          cancelId: 1,
+          message: "Delete all saved recordings?",
+          detail: "You won't be able to recover a dictation that didn't land."
+        });
+        if (response !== 0) return;
         await clearRecordings(recordingsDir);
         rebuildTrayMenu();
       }
@@ -1731,6 +1758,13 @@ async function applyEnvPatchLive(patch, source) {
   } else if (newProvider !== prevProvider) {
     reloadDictationWindow();
   }
+  // A speed test (or an on-device setup the user then abandoned) can leave a
+  // whisper-server warm, keeping the model resident in RAM/VRAM for the rest of
+  // the session. Once we're committed to a cloud engine, reclaim it. Idempotent:
+  // a no-op when nothing is running, and skipped on the on-device path.
+  if (newProvider !== "whisper-local" && newProvider !== "local") {
+    try { stopWhisperServer(); } catch {}
+  }
   updateTrayTooltip();
   rebuildTrayMenu();
 }
@@ -1758,6 +1792,20 @@ function needsOnboarding() {
 }
 
 app.whenReady().then(async () => {
+  // Defense-in-depth navigation lockdown. Every window today loads only bundled
+  // app HTML or the loopback relay, so nothing here triggers — but if a future
+  // change ever rendered remote or transcript-derived markup, this stops a
+  // window from navigating itself off-origin or spawning a popup. (Registered
+  // before any window is created so it catches all of them.)
+  app.on("web-contents-created", (_e, contents) => {
+    contents.setWindowOpenHandler(() => ({ action: "deny" }));
+    contents.on("will-navigate", (event, url) => {
+      const local = url.startsWith("file://") ||
+        url.startsWith("http://127.0.0.1:") || url.startsWith("http://localhost:");
+      if (!local) event.preventDefault();
+    });
+  });
+
   // The very first thing on screen: a branded splash, not a terminal or a bare
   // window. It reports boot progress and later tucks itself into the tray.
   createSplashWindow();
@@ -1836,13 +1884,11 @@ app.whenReady().then(async () => {
   // the relay and brings dictation up without a restart (see settings:save).
   if (onboard) openSettingsWindow({ firstRun: true, reason: onboard });
 
-  // Prewarm the typing module at startup. In the default clipboard mode this
-  // returns immediately (paste is a native keybd_event — no nut-js), so it only
-  // pays the ~300ms nut-js import cost up front when the character-by-character
-  // typing path (TYPE_VIA_CLIPBOARD=false) is in use.
-  if (process.platform === "win32") {
-    import("./src/typing.js").then((m) => m.prewarmTyping()).catch(() => {});
-  }
+  // Prewarm the typing module at startup. prewarmTyping() returns immediately on
+  // the native-paste platforms in clipboard mode (paste is a native keystroke —
+  // no nut-js), so this only pays the ~300ms nut-js import up front where it's
+  // actually used: Linux, or anywhere TYPE_VIA_CLIPBOARD=false.
+  import("./src/typing.js").then((m) => m.prewarmTyping()).catch(() => {});
 
   // Warm whisper-server at boot so the first dictation doesn't pay the model
   // load cost — and so any server orphaned by a previous crash is reaped now,

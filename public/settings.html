@@ -32,7 +32,7 @@
         padding: 9px 11px; font: inherit; outline: none;
       }
       select:focus, input:focus { border-color: #4aa3ff; }
-      input::placeholder { color: #6b7986; }
+      input::placeholder { color: #8d99a7; }
       .check { display: flex; align-items: center; gap: 9px; font-weight: 600; cursor: pointer; }
       .check input { width: 16px; height: 16px; }
       .inline { display: flex; align-items: center; gap: 10px; }
@@ -213,6 +213,7 @@
       });
 
       el("clearBtn").addEventListener("click", async () => {
+        if (!confirm("Delete all saved recordings? You won't be able to recover a dictation that didn't land.")) return;
         const removed = await window.settingsBridge.clearRecordings();
         setStatus(removed ? `Deleted ${removed} recording${removed === 1 ? "" : "s"}.` : "No recordings to delete.", true);
       });
@@ -248,9 +249,14 @@
       });
 
       async function initEnginePanel() {
-        let info;
-        try { info = await window.settingsBridge.engineProbe(); } catch { return; }
         const suggest = el("engineSuggest");
+        let info;
+        try {
+          info = await window.settingsBridge.engineProbe();
+        } catch {
+          suggest.textContent = "Couldn't check this computer — pick a cloud engine above and paste its key below.";
+          return;
+        }
         // Mac (and anything non-Windows) has no on-device engine in this version.
         if (info.platform && info.platform !== "win32") {
           suggest.textContent = "The free on-device engine isn't available on this platform yet — use a cloud engine above (paste your key below).";

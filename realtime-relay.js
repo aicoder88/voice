@@ -29,6 +29,7 @@ const defaultInstructions =
  * @property {string} [whisperBin]        Path to whisper-cli binary (default "whisper-cli").
  * @property {string} [whisperModel]      Path to whisper.cpp model file.
  * @property {string} [defaultProvider]   STT provider when ?provider= is absent ("openai" | "deepgram" | "whisper-local").
+ * @property {string[]} [allowedOrigins]   Web origins allowed to open a socket. Default: app-local (loopback) only, which is what the Electron app needs. Pass exact origin strings, or ["*"], to allow a cross-origin deployment.
  */
 
 /**
@@ -53,8 +54,31 @@ export function attachRealtimeRelay(server, options = {}) {
     deepgramLanguage = null,
     whisperBin = process.env.WHISPER_BIN || process.env.WHISPER_CLI || "whisper-cli",
     whisperModel = process.env.WHISPER_MODEL || "./models/ggml-small.en-q5_1.bin",
-    defaultProvider = process.env.STT_PROVIDER || "openai"
+    defaultProvider = process.env.STT_PROVIDER || "openai",
+    // Which web origins may open a relay socket. Default: app-local only — the
+    // relay spends your API keys, and it binds loopback, but a web page in your
+    // browser can still reach 127.0.0.1, so without this any site you visit
+    // could open a session on your key. The dictation renderer and the local
+    // demo are served from the relay's own loopback origin, so they pass; a
+    // remote page does not. Pass an array of exact origin strings (or ["*"]) to
+    // open it up for a cross-origin deployment of the reusable relay.
+    allowedOrigins = null
   } = options;
+
+  // True for a connection we should accept on Origin grounds. A missing Origin
+  // (native/non-browser clients like the parity harness, which can't be a CSRF
+  // vector) is allowed; a browser cannot forge this header, so a remote page is
+  // reliably rejected.
+  // new URL(origin).hostname returns IPv6 hosts bracketed ("[::1]"), never the
+  // bare form, so only the bracketed entry can ever match.
+  const LOOPBACK_HOSTS = new Set(["127.0.0.1", "localhost", "[::1]"]);
+  function isAllowedOrigin(origin) {
+    if (!origin) return true;
+    if (Array.isArray(allowedOrigins)) {
+      return allowedOrigins.includes("*") || allowedOrigins.includes(origin);
+    }
+    try { return LOOPBACK_HOSTS.has(new URL(origin).hostname); } catch { return false; }
+  }
 
   // Only require the OpenAI key when openai is the actual default provider. The
   // per-connection check below also rejects ?provider=openai requests when the
@@ -73,6 +97,13 @@ export function attachRealtimeRelay(server, options = {}) {
       // drop-in for any host server; if the host mounts its own WS endpoint on
       // another path, its upgrades arrive here too and must be left untouched.
       if (server.listenerCount("upgrade") === 1) socket.destroy();
+      return;
+    }
+    // Reject cross-origin browser connections — they'd be spending the user's
+    // API keys. The legitimate dictation renderer and local demo are loopback.
+    if (!isAllowedOrigin(request.headers.origin)) {
+      console.error("[relay] rejected upgrade from origin:", request.headers.origin);
+      socket.destroy();
       return;
     }
     browserSockets.handleUpgrade(request, socket, head, (clientSocket) => {
@@ -108,7 +139,15 @@ export function attachRealtimeRelay(server, options = {}) {
     }
 
     if (provider === "whisper-local" || provider === "local") {
-      attachWhisperLocal(clientSocket, { bin: whisperBin, model: whisperModel });
+      // Read the model (and bin) fresh from the environment, same as the keys
+      // above — this is what lets a Settings "Use on-device" model switch take
+      // effect on the very next dictation without an app restart. The construction
+      // value is the boot-time fallback. ensureWhisperServer respawns when the
+      // resolved path changes, so the new model is actually served.
+      attachWhisperLocal(clientSocket, {
+        bin: process.env.WHISPER_BIN || process.env.WHISPER_CLI || whisperBin,
+        model: process.env.WHISPER_MODEL || whisperModel
+      });
       return;
     }
 

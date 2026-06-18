@@ -173,7 +173,7 @@ class RealtimeVoiceAgent extends HTMLElement {
       this.disconnectButton.disabled = true;
       this.talkButton.disabled = true;
       this.interruptButton.disabled = true;
-      this.log("local.browser", "The local voice connection could not be opened.");
+      this.log("local.browser", "Couldn't reach the voice relay. Make sure the app is running, then press Connect again.");
     });
   }
 
@@ -193,7 +193,7 @@ class RealtimeVoiceAgent extends HTMLElement {
     } catch (error) {
       this.micStatus.textContent = "Blocked";
       this.voiceStatus.textContent = "Mic needed";
-      this.log("local.browser", `Microphone could not start: ${error.message}`);
+      this.log("local.browser", `Microphone blocked — allow mic access for this site, then press Connect and Start talking again. (${error.message})`);
       return;
     }
 
@@ -226,9 +226,10 @@ class RealtimeVoiceAgent extends HTMLElement {
     this.processorNode.connect(this.muteNode);
     this.muteNode.connect(this.audioContext.destination);
     this.micStatus.textContent = "Listening";
-    this.talkButton.textContent = "Stop and Send";
+    this.talkButton.textContent = "Stop and send";
+    this.talkButton.setAttribute("aria-pressed", "true");
     this.talkButton.classList.add("recording");
-    this.log("local.browser", "Microphone started. Talk now, then press Stop and Send.");
+    this.log("local.browser", "Microphone started. Talk now, then press Stop and send.");
   }
 
   stopAndAskForResponse() {
@@ -256,7 +257,8 @@ class RealtimeVoiceAgent extends HTMLElement {
     if (this.micStatus) this.micStatus.textContent = "Idle";
     if (this.levelStatus) this.levelStatus.textContent = "0%";
     if (this.talkButton) {
-      this.talkButton.textContent = "Start Talking";
+      this.talkButton.textContent = "Start talking";
+      this.talkButton.setAttribute("aria-pressed", "false");
       this.talkButton.classList.remove("recording");
     }
     this.processorNode?.disconnect();
@@ -278,7 +280,8 @@ class RealtimeVoiceAgent extends HTMLElement {
     this.disconnectButton.disabled = true;
     this.talkButton.disabled = true;
     this.interruptButton.disabled = true;
-    this.talkButton.textContent = "Start Talking";
+    this.talkButton.textContent = "Start talking";
+    this.talkButton.setAttribute("aria-pressed", "false");
   }
 
   async ensureAudioContext() {

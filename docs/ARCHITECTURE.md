@@ -81,7 +81,8 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 ### `public/` (browser-side)
 
 - **`index.html`** — Demo page that mounts the reusable web component.
-- **`realtime-voice-agent.js`** — `<realtime-voice-agent>` custom element. Self-contained shadow-DOM UI: agent personality selector, instructions textarea, mic capture, WebSocket lifecycle, PCM playback queue. Public attributes: `endpoint`, `agent`, `compact`, `instructions`, `autoconnect`.
+- **`realtime-voice-agent.js`** — `<realtime-voice-agent>` custom element. Self-contained shadow-DOM UI: agent personality selector, instructions textarea, mic capture, WebSocket lifecycle, PCM playback queue. Public attributes: `endpoint`, `agent`, `compact`, `instructions`, `autoconnect`, `title`, `subtitle`.
+  - **`realtime-voice-agent/`** — the component's helpers, split out in refactor Pass 6: `agents.js` (personality presets + persistence), `audio-utils.js` (base64/Int16 PCM helpers), `template.js` (shadow-DOM markup).
 - **`pill.html`** — Frameless transparent always-on-top "Listening…" indicator shown near the cursor while the hotkey is held.
 - **`dictation.html` + `dictation.js`** — Hidden Electron renderer that captures the microphone, downsamples to 24 kHz PCM16, streams it to the relay over `/realtime?provider=...`, and forwards the final transcript to `main.js` over IPC.
 - **`audio-capture-worklet.js`** — The `AudioWorklet` processor that does the capture/downsample work for the dictation renderer.
@@ -124,8 +125,9 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 | ------------------------- | -------------------------------- | ---------------------- |
 | `OPENAI_API_KEY`          | *(required)*                     | relay, cleanup         |
 | `OPENAI_REALTIME_MODEL`   | `gpt-realtime-2`                 | relay                  |
-| `PORT`                    | `3000`                           | server                 |
+| `PORT`                    | free port picked each launch (set to pin one) | server    |
 | `STT_PROVIDER`            | `openai`                         | relay, dictation       |
+| `WHISPER_LANGUAGE`        | `auto`                           | relay (Deepgram), whisper-local |
 | `DEEPGRAM_API_KEY`        | —                                | relay (Deepgram)       |
 | `DEEPGRAM_MODEL`          | `nova-3`                         | relay (Deepgram)       |
 | `WHISPER_BIN`             | `whisper-cli` (`WHISPER_CLI` accepted as legacy alias) | relay, main |
@@ -142,3 +144,7 @@ Both surfaces use the same relay (`realtime-relay.js`) and the same `/realtime` 
 | `GOOGLE_AI_KEY`           | —                                | cleanup                |
 | `TYPE_VIA_CLIPBOARD`      | `true`                           | typing                 |
 | `TYPE_RELEASE_DELAY_MS`   | `80`                             | typing                 |
+| `RECORDINGS_ENABLED`      | `true`                           | main (recordings)      |
+| `RECORDING_RETENTION_DAYS`| `7`                              | main (recordings)      |
+| `GVOICE_CORRECTION_WATCH_MS` | `12000`                       | main (correction-watch)|
+| `GVOICE_DEBUG`            | *(off)*                          | main (debug log echo)  |

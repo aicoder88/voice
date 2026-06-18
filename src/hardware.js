@@ -109,13 +109,23 @@ export function detectGpu() {
   }
 }
 
+/** @type {ReturnType<typeof classifyCapability> | null} */
+let capabilityCache = null;
+
 /**
  * Gather real hardware facts and classify them. The single entry point main.js
- * calls on first run.
+ * calls when the Settings engine panel opens and before a benchmark.
+ *
+ * Memoized for the process lifetime: cores/RAM/GPU/arch don't change while the
+ * app runs, and on Windows the GPU probe shells out to wmic/PowerShell, which
+ * blocks the main event loop. Caching means that cost is paid at most once
+ * instead of on every Settings-open and every benchmark. (The first call still
+ * blocks; a fully async GPU probe would remove even that.)
  *
  * @returns {{ tier: "capable"|"limited", gpu: string, cores: number, ramGB: number, reason: string }}
  */
 export function probeCapability() {
+  if (capabilityCache) return capabilityCache;
   const facts = {
     cores: cpus().length,
     ramGB: Math.round(totalmem() / 1024 ** 3),
@@ -123,5 +133,8 @@ export function probeCapability() {
     arch: arch(),
     gpu: detectGpu()
   };
-  return classifyCapability(facts);
+  // Frozen: every caller gets this same shared instance, so freezing stops a
+  // stray `probe.tier = ...` from silently poisoning the cache process-wide.
+  capabilityCache = Object.freeze(classifyCapability(facts));
+  return capabilityCache;
 }

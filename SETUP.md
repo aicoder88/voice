@@ -76,12 +76,15 @@ An Electron window opens with status info. A tray icon shows up in the system tr
 | `WHISPER_BIN` | `whisper-cli` | Full path to whisper.cpp's `whisper-cli.exe`. Set by the Windows setup script. (`WHISPER_CLI` is accepted as a legacy alias.) |
 | `WHISPER_MODEL` | `./models/ggml-small.en-q5_1.bin` | Full path to a GGML model file. Set by the Windows setup script. |
 | `WHISPER_PORT` | *(free port each launch)* | Port the whisper-server child process listens on. Picked automatically; set this only to pin a fixed port. |
+| `WHISPER_LANGUAGE` | `auto` | Dictation language for the local Whisper and Deepgram engines (the OpenAI engine ignores it). The right-Ctrl tap and the Settings dropdown write it, cycling `auto` → `hr` (Croatian) → `en` (English). Auto-detect is shaky on short clips, so forcing `hr` or `en` makes a language stick. For local Whisper you can also set any other Whisper language code (e.g. `fr`, `de`, `es`). |
 | `CLEANUP_ENABLED` | `true` | LLM polish (punctuation, remove "um"/"uh"). |
 | `CLEANUP_PROVIDER` | `groq` (ships a free-tier key, so cleanup works with no setup) | Which API runs the cleanup pass: `groq`, `openai`, `anthropic`, or `google`. |
 | `CLEANUP_MODEL` | *(per provider)* | Cleanup model. Defaults: `meta-llama/llama-4-scout-17b-16e-instruct` (groq), `gpt-4.1-mini` (openai), `claude-haiku-4-5` (anthropic), `gemini-2.5-flash-lite` (google). The Groq default is fast, formats spoken lists into proper bullet/numbered lists, and has the highest free-tier token limit of Groq's models. |
 | `CLEANUP_TIMEOUT_MS` | `2500` | Max wait for the cleanup pass before falling back to the raw transcript. A 429 rate-limit is not retried (its limit resets per minute, so an immediate retry just fails again); 5xx/network errors still get one retry. |
 | `TYPE_VIA_CLIPBOARD` | `true` | Paste vs simulated keystrokes. Paste is faster and more reliable. |
-| `PORT` | `3000` | Local relay port. |
+| `PORT` | *(free port each launch)* | Local relay port. Auto-picked so it never collides with a dev server on 3000; set it only to pin one, and even a pinned-but-busy port falls back to a free one. |
+| `RECORDINGS_ENABLED` | `true` | Keep dictation audio on disk so a missed paste stays recoverable. Set `false` to keep none. Also a toggle in the Settings window. |
+| `RECORDING_RETENTION_DAYS` | `7` | How long saved clips linger before auto-delete (on top of the last-50 count cap). `0` = keep until the count cap evicts them. |
 | `GVOICE_CORRECTION_WATCH_MS` | `12000` | How long after a dictation GVoice watches for a hand-typed correction (macOS/Linux). Set to `0` to turn manual-edit suggestions off. |
 | `GVOICE_DEBUG` | *(off)* | Set to `1` to echo per-event traces (presses, paste timing, cleanup) to the console. They're always written to the app-data `debug.log` regardless (macOS: `~/Library/Application Support/GVoice/debug.log`). |
 
@@ -103,7 +106,9 @@ A hand-curated starter list lives in `models/vocab.txt` — this *is* still fed 
 
 ## Languages
 
-Whisper supports 57+ languages including English, French, Croatian, Bosnian, Serbian, Spanish, Italian, German, and more. It auto-detects per chunk - you can switch mid-sentence.
+Whisper handles 50+ languages — English, French, Croatian, Bosnian, Serbian, Spanish, Italian, German, and more. Dictate any one of them on the default on-device engine by setting `WHISPER_LANGUAGE` to its code (e.g. `fr`, `de`, `es`).
+
+Automatic detection (the `auto` setting, and the right-Ctrl toggle's "Auto") is deliberately limited to **Croatian + English only**. Free auto-detect across every language was making short clips come back in the wrong language, so it's pinned to the two languages this app is used in. To dictate another language, set `WHISPER_LANGUAGE` explicitly rather than relying on auto.
 
 ## Troubleshooting
 
@@ -146,7 +151,7 @@ dictation.js commits buffer, IPC sends final transcript
 main.js -> cleanup.js (LLM polish) -> typing.js (clipboard paste) -> focused app
 ```
 
-The relay listens on `PORT` (default 3000); if that port is busy it falls back to a free one, so the actual port can vary per launch.
+With no `PORT` set, the relay grabs a fresh free port each launch (so it never collides with a dev server on 3000), which is why the actual port varies per launch. Set `PORT` to pin a fixed one; if that pinned port is busy it still falls back to a free one.
 
 ## Files
 

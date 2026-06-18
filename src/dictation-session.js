@@ -88,6 +88,14 @@ export class DictationSession {
     this.busy = false;
   }
 
+  // Abandon the current dictation on an error path: stop the safety timer and
+  // re-open the session in one step. The success path keeps calling finalize()
+  // then done() separately because it needs finalize()'s timing return.
+  fail() {
+    this.finalize();
+    this.done();
+  }
+
   _clearSafetyTimer() {
     if (this._safetyTimer) {
       clearTimeout(this._safetyTimer);

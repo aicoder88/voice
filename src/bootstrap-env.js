@@ -39,7 +39,6 @@ const HOME = process.env.GVOICE_HOME || (app.isPackaged ? USERDATA_HOME : proces
 
 // One source of truth for where engine assets live, reused by the on-demand
 // downloader (src/model-download.js) and main.js so nothing guesses a path.
-export const APP_HOME = HOME;
 export const MODELS_DIR = join(HOME, "models");
 export const BIN_DIR = join(HOME, "bin");
 

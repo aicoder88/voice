@@ -130,24 +130,39 @@ export function getTerms() {
 }
 
 /**
+ * Add a term and report exactly what happened, so a caller can give precise
+ * feedback ("added", "already there", "too long") instead of a bare boolean.
+ * The length test runs on the SAME whitespace-collapsed string the store keeps,
+ * so a term that fits after collapsing isn't wrongly rejected as too long, and
+ * a punctuation-only entry (no usable key) is "invalid", not a false duplicate.
+ * addTerm() below delegates here, so the two can never diverge.
+ * @param {string} term
+ * @returns {"added"|"duplicate"|"too-long"|"invalid"}
+ */
+export function addTermResult(term) {
+  const cleaned = String(term || "").trim().replace(/\s+/g, " ");
+  if (!cleaned) return "invalid";
+  if (cleaned.length > MAX_TERM_LEN) return "too-long";
+  load();
+  const key = normalize(cleaned);
+  if (!key) return "invalid";
+  store.dismissed = store.dismissed.filter((d) => normalize(d) !== key);
+  if (store.terms.some((t) => normalize(t) === key)) {
+    save();
+    return "duplicate";
+  }
+  store.terms.push(cleaned);
+  save();
+  return "added";
+}
+
+/**
  * Add a term to the dictionary (and clear it from the dismissed list).
  * Returns true if it was newly added.
  * @param {string} term
  */
 export function addTerm(term) {
-  const cleaned = String(term || "").trim().replace(/\s+/g, " ");
-  if (!cleaned || cleaned.length > MAX_TERM_LEN) return false;
-  load();
-  const key = normalize(cleaned);
-  if (!key) return false;
-  store.dismissed = store.dismissed.filter((d) => normalize(d) !== key);
-  if (store.terms.some((t) => normalize(t) === key)) {
-    save();
-    return false;
-  }
-  store.terms.push(cleaned);
-  save();
-  return true;
+  return addTermResult(term) === "added";
 }
 
 /**
@@ -311,6 +326,18 @@ function levenshtein(a, b) {
 // correctTranscript(). Deepgram/OpenAI keep their biasing — their keyterm/prompt
 // boosting is far less hallucination-prone than whisper's free-text prompt.
 
+// Cap on terms fed into a per-request text prompt (OpenAI transcription prompt,
+// the cleanup pass). The whole store is still kept and still drives the whisper
+// fix-after and Deepgram boosting; this only bounds prompt size so a large
+// dictionary can't bloat — and dilute — every request. Most recent terms win.
+const MAX_PROMPT_TERMS = 100;
+
+/** Most-recent terms for a text prompt, capped at MAX_PROMPT_TERMS. */
+export function promptTerms() {
+  const terms = getTerms();
+  return terms.length > MAX_PROMPT_TERMS ? terms.slice(-MAX_PROMPT_TERMS) : terms;
+}
+
 /**
  * Terms for Deepgram keyterm / keywords boosting (English only — see caller).
  * Capped so the handshake URL (each term is a repeated query param) can't grow
@@ -323,7 +350,7 @@ export function deepgramKeyterms() {
 
 /** Prompt fragment for the OpenAI transcription model. "" when no custom terms. */
 export function openaiPromptAddition() {
-  const terms = getTerms();
+  const terms = promptTerms();
   if (!terms.length) return "";
   return "Proper nouns and terms that may appear: " + terms.join(", ") + ".";
 }

@@ -18,7 +18,7 @@ import { dirname } from "node:path";
 // patchFromView below. Everything else in the .env (other tuning knobs,
 // comments) is left exactly as the user wrote it.
 
-const VALID_PROVIDERS = new Set(["openai", "deepgram", "whisper-local"]);
+export const VALID_PROVIDERS = new Set(["openai", "deepgram", "whisper-local"]);
 const VALID_LANGUAGES = new Set(["auto", "hr", "en"]);
 
 /**

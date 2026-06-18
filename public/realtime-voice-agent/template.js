@@ -177,7 +177,7 @@ export function renderTemplate({ title, subtitle }) {
       <div class="voice-agent">
         <header>
           <h2>${title || "Voice Companion"}</h2>
-          <p>${subtitle || "Pick a personality, connect, then use the talk button to start and send your voice."}</p>
+          <p>${subtitle || "Pick a personality and connect, then hit Start talking, say your piece, and click again to send."}</p>
         </header>
 
         <section>
@@ -195,8 +195,8 @@ export function renderTemplate({ title, subtitle }) {
               <label for="instructions">Agent instructions</label>
               <textarea id="instructions"></textarea>
               <div class="actions save-actions">
-                <button id="savePersonality">Save Personality</button>
-                <button id="resetPersonality">Reset Personalities</button>
+                <button id="savePersonality">Save personality</button>
+                <button id="resetPersonality">Reset personalities</button>
               </div>
             </div>
           </div>
@@ -204,26 +204,26 @@ export function renderTemplate({ title, subtitle }) {
           <div class="status">
             <div class="pill">
               <strong>Connection</strong>
-              <span id="connectionStatus">Offline</span>
+              <span id="connectionStatus" role="status" aria-live="polite">Offline</span>
             </div>
             <div class="pill">
               <strong>Microphone</strong>
-              <span id="micStatus">Idle</span>
+              <span id="micStatus" role="status" aria-live="polite">Idle</span>
             </div>
             <div class="pill">
               <strong>Mic level</strong>
-              <span id="levelStatus">0%</span>
+              <span id="levelStatus" aria-hidden="true">0%</span>
             </div>
             <div class="pill">
               <strong>AI voice</strong>
-              <span id="voiceStatus">Waiting</span>
+              <span id="voiceStatus" role="status" aria-live="polite">Waiting</span>
             </div>
           </div>
 
           <div class="actions">
             <button id="connect" class="primary">Connect</button>
             <button id="disconnect" disabled>Disconnect</button>
-            <button id="talk" disabled>Start Talking</button>
+            <button id="talk" disabled aria-pressed="false">Start talking</button>
             <button id="interrupt" class="danger" disabled>Stop AI</button>
           </div>
 

@@ -12,7 +12,7 @@ cp .env.example .env   # then add your API key(s)
 pnpm start
 ```
 
-The app lives in the menu bar (macOS) or system tray (Windows). Hold **right Option** (macOS) or **Ctrl+Shift** (Windows, either side), speak, and release. On macOS, holding **left Ctrl+Cmd** or the **mouse back button** works too. Tap **right Ctrl** to flip the language. Full setup — including the local, no-API-cost Whisper option — is in [SETUP.md](SETUP.md).
+The app lives in the menu bar (macOS) or system tray (Windows). Hold **right Option** (macOS) or **Ctrl+Shift** (Windows, either side), speak, and release. On macOS, holding **left Ctrl+Cmd** or the **mouse back button** works too. Tap **right Ctrl** to cycle the dictation language (Auto → Croatian → English). Full setup — including the local, no-API-cost Whisper option — is in [SETUP.md](SETUP.md).
 
 First launch with no API key set? GVoice opens its **Settings** window so you can pick an engine and paste a key — no hand-editing files. You can reopen it any time from the tray (**Settings…**).
 

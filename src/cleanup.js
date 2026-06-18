@@ -152,7 +152,7 @@ export async function polishTranscript(rawText) {
   // rule — it never licenses rewriting ordinary words.
   let vocabHint = "";
   try {
-    const terms = vocab.getTerms();
+    const terms = vocab.promptTerms();
     if (terms.length) {
       vocabHint =
         "The speaker's custom dictionary — correct spellings of names and terms they often say: " +
