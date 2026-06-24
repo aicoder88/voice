@@ -21,25 +21,21 @@
 //   Event-based via uiohook-napi. Uses its global keydown/keyup/mouse stream
 //   and matches three hold-to-talk triggers by uiohook keycode/button:
 //   right-Alt, left-Ctrl + left-Cmd held together, and the mouse "back"
-//   button. Right-Ctrl tap toggles language. macOS requires Accessibility
-//   permission for the app to receive these events.
+//   button. macOS requires Accessibility permission for the app to receive
+//   these events.
 //
 // Both paths honor the same contract:
 //   - Hold-to-talk trigger(s): onPress on the down edge, onRelease on the up.
 //     On macOS several triggers feed one shared press/release state, so
 //     overlapping holds (e.g. mouse button + right Option) act as one press.
-//   - Right Ctrl tap (down + up within CTRL_TAP_WINDOW_MS, with no other key
-//     going down in between) fires onToggleLanguage. Holding right Ctrl, or
-//     pressing it as part of a chord, does NOT toggle.
 
 import { createRequire } from "node:module";
-import { isRightCtrlDown, isCtrlDown, isShiftDown } from "./foreground.js";
-import { createTapDetector, createHoldTracker } from "./hotkey-logic.js";
+import { isCtrlDown, isShiftDown } from "./foreground.js";
+import { createHoldTracker } from "./hotkey-logic.js";
 
 const require = createRequire(import.meta.url);
 
 const POLL_INTERVAL_MS = 33;
-const CTRL_TAP_WINDOW_MS = 300;
 
 // Edge traces (press/release/tap) are useful when debugging a stuck hotkey but
 // noisy in normal use. Gate them behind GVOICE_DEBUG; real errors stay loud.
@@ -52,7 +48,6 @@ function debug(/** @type {any[]} */ ...args) {
  * @typedef {{
  *   onPress?: (key: "alt") => void,
  *   onRelease?: (key: "alt") => void,
- *   onToggleLanguage?: () => void,
  * }} HotkeyCallbacks
  */
 
@@ -73,10 +68,8 @@ export function startHotkey(callbacks) {
  * @param {HotkeyCallbacks} callbacks
  * @returns {{ stop: () => void }}
  */
-function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
+function startHotkeyWindows({ onPress, onRelease }) {
   let holdWas = false;
-  let shiftWas = false;
-  let rCtrlWas = false;
   const hold = createHoldTracker({
     onPress: () => {
       debug("[hotkey] PRESS ctrl+shift");
@@ -87,43 +80,16 @@ function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
       try { onRelease?.("alt"); } catch (error) { console.error("hotkey onRelease error:", error); }
     }
   });
-  const tap = createTapDetector({ windowMs: CTRL_TAP_WINDOW_MS });
 
   const tick = () => {
-    const ctrlNow = isCtrlDown();        // either Ctrl
-    const shiftNow = isShiftDown();      // either Shift
-    const rCtrlNow = isRightCtrlDown();  // right Ctrl only, for the toggle tap
-    const holdNow = ctrlNow && shiftNow; // hold-to-talk = Ctrl+Shift together
+    const holdNow = isCtrlDown() && isShiftDown(); // hold-to-talk = Ctrl+Shift together
 
     if (holdNow && !holdWas) {
-      // Chord engaged — it's a hold, never a Ctrl tap.
-      tap.other();
       hold.press("ctrlShift");
     } else if (!holdNow && holdWas) {
       hold.release("ctrlShift");
     }
     holdWas = holdNow;
-
-    // Shift going down also cancels any in-progress right-Ctrl tap, so the
-    // Ctrl→Shift order of engaging the chord never leaks out as a toggle.
-    if (shiftNow && !shiftWas) tap.other();
-    shiftWas = shiftNow;
-
-    // Language toggle: a clean right-Ctrl tap with NO Shift involved. Arming
-    // only when Shift is up keeps the chord from ever registering as a tap.
-    if (rCtrlNow && !rCtrlWas) {
-      if (!shiftNow) tap.down();
-    } else if (!rCtrlNow && rCtrlWas) {
-      if (tap.up()) {
-        debug("[hotkey] TAP ctrl");
-        try {
-          onToggleLanguage?.();
-        } catch (error) {
-          console.error("hotkey onToggleLanguage error:", error);
-        }
-      }
-    }
-    rCtrlWas = rCtrlNow;
   };
 
   const timer = setInterval(tick, POLL_INTERVAL_MS);
@@ -149,13 +115,10 @@ function startHotkeyWindows({ onPress, onRelease, onToggleLanguage }) {
  *     If a mouse-remapper app swallows the raw button, mapping the button to
  *     a held Ctrl+Cmd keystroke triggers the chord path instead.
  *
- *   - Right Control = tap-to-toggle. UiohookKey.CtrlR / ControlRight, plus
- *     the 3613 scancode fallback.
- *
  * @param {HotkeyCallbacks} callbacks
  * @returns {{ stop: () => void }}
  */
-function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
+function startHotkeyUiohook({ onPress, onRelease }) {
   // Lazy require so Windows builds don't choke if uiohook-napi isn't present
   // (e.g. native rebuild skipped, prebuild missing). The project is ESM, so
   // we go through createRequire to keep this synchronous and preserve the
@@ -183,16 +146,6 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
       // deliberately NOT listed — including it made the left Option key also
       // fire dictation on macOS.
       3640
-    ].filter((v) => typeof v === "number")
-  );
-  // Right-Ctrl only. Left-Ctrl is deliberately excluded — Ctrl+C / Ctrl+V
-  // are everywhere and would constantly fire the toggle.
-  const CTRL_R_KEYCODES = new Set(
-    [
-      keyCodes.CtrlR,
-      keyCodes.ControlRight,
-      // Raw scancode fallback for the extended right-ctrl.
-      3613
     ].filter((v) => typeof v === "number")
   );
   // Left Ctrl / left Cmd for the chord trigger. Raw fallbacks: 29 (left Ctrl)
@@ -224,7 +177,6 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
 
   let ctrlLDown = false;
   let cmdLDown = false;
-  const tap = createTapDetector({ windowMs: CTRL_TAP_WINDOW_MS });
 
   const handleDown = (/** @type {any} */ event) => {
     const code = event && event.keycode;
@@ -244,33 +196,20 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
       if (event.altKey === false) releaseSource("alt");
       if (event.ctrlKey === false || event.metaKey === false) releaseSource("ctrlCmd");
     }
-    // Any hold-to-talk key counts as "another key" if the right-Ctrl tap
-    // window is open (tap.other() no-ops when it isn't), so a chord involving
-    // right Ctrl never toggles language.
     if (ALT_KEYCODES.has(code)) {
-      tap.other();
       pressSource("alt");
       return;
     }
     if (CTRL_L_KEYCODES.has(code)) {
-      tap.other();
       ctrlLDown = true;
       if (cmdLDown) pressSource("ctrlCmd");
       return;
     }
     if (CMD_L_KEYCODES.has(code)) {
-      tap.other();
       cmdLDown = true;
       if (ctrlLDown) pressSource("ctrlCmd");
       return;
     }
-    if (CTRL_R_KEYCODES.has(code)) {
-      tap.down(); // ignores auto-repeat internally
-      return;
-    }
-    // Any other key cancels the in-progress Ctrl tap, so Ctrl-chord shortcuts
-    // are not misread as a language toggle.
-    tap.other();
   };
 
   const handleUp = (/** @type {any} */ event) => {
@@ -287,17 +226,6 @@ function startHotkeyUiohook({ onPress, onRelease, onToggleLanguage }) {
     if (CMD_L_KEYCODES.has(code)) {
       cmdLDown = false;
       releaseSource("ctrlCmd");
-      return;
-    }
-    if (CTRL_R_KEYCODES.has(code)) {
-      if (tap.up()) {
-        debug("[hotkey] TAP ctrl");
-        try {
-          onToggleLanguage?.();
-        } catch (error) {
-          console.error("hotkey onToggleLanguage error:", error);
-        }
-      }
       return;
     }
   };

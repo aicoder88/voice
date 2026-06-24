@@ -104,7 +104,6 @@ test("readEnvFile: missing file yields empty string (no throw)", () => {
 test("settingsView: defaults when env is empty", () => {
   const v = settingsView({});
   assert.equal(v.provider, "openai");
-  assert.equal(v.language, "auto");
   // Mirrors main.js's runtime check (cleanup runs unless explicitly "false") —
   // the view must agree or Save would silently flip cleanup off on fresh installs.
   assert.equal(v.cleanupEnabled, true);
@@ -115,27 +114,23 @@ test("settingsView: defaults when env is empty", () => {
 test("settingsView: reads + coerces values, falls back on invalid enums", () => {
   const v = settingsView({
     STT_PROVIDER: "deepgram",
-    WHISPER_LANGUAGE: "hr",
     CLEANUP_ENABLED: "true",
     RECORDINGS_ENABLED: "false",
     RECORDING_RETENTION_DAYS: "14",
     OPENAI_API_KEY: "k"
   });
   assert.equal(v.provider, "deepgram");
-  assert.equal(v.language, "hr");
   assert.equal(v.cleanupEnabled, true);
   assert.equal(v.recordingsEnabled, false);
   assert.equal(v.retentionDays, 14);
   assert.equal(v.openaiKey, "k");
 
   assert.equal(settingsView({ STT_PROVIDER: "bogus" }).provider, "openai");
-  assert.equal(settingsView({ WHISPER_LANGUAGE: "fr" }).language, "auto");
 });
 
 test("patchFromView: maps fields to env keys and drops unknowns/invalids", () => {
   const patch = patchFromView({
     provider: "whisper-local",
-    language: "en",
     cleanupEnabled: true,
     openaiKey: "  trimmed  ",
     recordingsEnabled: false,
@@ -143,7 +138,6 @@ test("patchFromView: maps fields to env keys and drops unknowns/invalids", () =>
     bogus: "ignored"
   });
   assert.equal(patch.STT_PROVIDER, "whisper-local");
-  assert.equal(patch.WHISPER_LANGUAGE, "en");
   assert.equal(patch.CLEANUP_ENABLED, "true");
   assert.equal(patch.OPENAI_API_KEY, "trimmed");
   assert.equal(patch.RECORDINGS_ENABLED, "false");
@@ -151,10 +145,9 @@ test("patchFromView: maps fields to env keys and drops unknowns/invalids", () =>
   assert.equal("bogus" in patch, false);
 });
 
-test("patchFromView: invalid provider/language are omitted (not corrupted)", () => {
-  const patch = patchFromView({ provider: "hax", language: "zz" });
+test("patchFromView: invalid provider is omitted (not corrupted)", () => {
+  const patch = patchFromView({ provider: "hax" });
   assert.equal("STT_PROVIDER" in patch, false);
-  assert.equal("WHISPER_LANGUAGE" in patch, false);
 });
 
 test("patchFromView: retentionDays clamps to [0,365] and rounds", () => {

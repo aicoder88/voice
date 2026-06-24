@@ -4,8 +4,8 @@
 //      remember which app was focused when the hotkey was pressed so we can
 //      paste back into it, even if Electron stole focus during the IPC
 //      round-trip, and locate its on-screen rect to anchor the pill.
-//   2. isRightCtrlDown — synchronous physical-key state query the polling
-//      hotkey loop in src/hotkey.js calls at ~30 Hz.
+//   2. isCtrlDown / isShiftDown — synchronous physical-key state queries the
+//      polling hotkey loop in src/hotkey.js calls at ~30 Hz.
 //
 // All koffi/user32 calls are gated behind `isWin`. On macOS / Linux the
 // capture/restore/getWindowRect exports are stubs that return null/false —
@@ -374,8 +374,6 @@ export function isForegroundWindow(hwnd) {
   }
 }
 
-// VK_RCONTROL = 0xA3 (right Ctrl only — used for the language-toggle tap).
-const VK_RCONTROL = 0xA3;
 // VK_CONTROL / VK_SHIFT match EITHER side — the hold-to-talk chord is
 // Ctrl+Shift from whichever hand the user prefers.
 const VK_CONTROL = 0x11;
@@ -415,14 +413,6 @@ function asyncKeyDown(/** @type {number} */ vk) {
   } catch {
     return false;
   }
-}
-
-/**
- * True iff the right Ctrl key is physically held down right now.
- * @returns {boolean}
- */
-export function isRightCtrlDown() {
-  return asyncKeyDown(VK_RCONTROL);
 }
 
 /**

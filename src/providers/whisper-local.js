@@ -501,12 +501,11 @@ export async function attach(clientSocket, { bin, model }) {
       }
       try {
         const prompt = await loadPrompt();
-        // Read the language the same way deepgram.js does — fresh from the env
-        // the right-Ctrl toggle writes (main.js sets process.env.WHISPER_LANGUAGE),
-        // so flipping auto/hr/en applies on the very next dictation with no
-        // restart. Without this, whisper-server defaults to English and decodes
-        // Croatian speech as garbage. "auto" lets whisper detect the language.
-        const language = (process.env.WHISPER_LANGUAGE || "auto").toLowerCase();
+        // Dictation is English-only (main.js locks process.env.WHISPER_LANGUAGE
+        // to "en" at load), so default to English here too rather than "auto" —
+        // the provider defends the invariant itself instead of trusting a single
+        // env assignment in main.js.
+        const language = (process.env.WHISPER_LANGUAGE || "en").toLowerCase();
         const raw = await transcribePcm(pcm, SAMPLE_RATE, bin, model, prompt, language);
         const transcript = sanitizeTranscript(raw);
         if (raw && !transcript) {

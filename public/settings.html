@@ -119,16 +119,6 @@
       </div>
 
       <div class="field">
-        <label class="row" for="language">Default language</label>
-        <select id="language">
-          <option value="auto">Detect automatically (Croatian or English)</option>
-          <option value="hr">Croatian</option>
-          <option value="en">English</option>
-        </select>
-        <div class="hint">You can also flip between these any time by tapping right Ctrl while the app is running.</div>
-      </div>
-
-      <div class="field">
         <label class="check"><input type="checkbox" id="cleanupEnabled" /> Tidy up the text with AI</label>
         <div class="hint">Adds punctuation, capitalization, and the odd bullet list, without changing your words. Takes a beat longer and uses your cleanup API key.</div>
       </div>
@@ -176,7 +166,6 @@
 
       function fill(view) {
         el("provider").value = view.provider;
-        el("language").value = view.language;
         el("cleanupEnabled").checked = !!view.cleanupEnabled;
         el("openaiKey").value = view.openaiKey || "";
         el("deepgramKey").value = view.deepgramKey || "";
@@ -187,7 +176,6 @@
       function collect() {
         return {
           provider: el("provider").value,
-          language: el("language").value,
           cleanupEnabled: el("cleanupEnabled").checked,
           openaiKey: el("openaiKey").value,
           deepgramKey: el("deepgramKey").value,

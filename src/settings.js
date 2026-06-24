@@ -19,7 +19,6 @@ import { dirname } from "node:path";
 // comments) is left exactly as the user wrote it.
 
 export const VALID_PROVIDERS = new Set(["openai", "deepgram", "whisper-local"]);
-const VALID_LANGUAGES = new Set(["auto", "hr", "en"]);
 
 /**
  * Parse .env text into the ordered raw lines plus a name→{ value, lineIndex }
@@ -129,10 +128,8 @@ function asBool(value, fallback) {
  */
 export function settingsView(env = {}) {
   const provider = (env.STT_PROVIDER || "openai").toLowerCase();
-  const language = (env.WHISPER_LANGUAGE || "auto").toLowerCase();
   return {
     provider: VALID_PROVIDERS.has(provider) ? provider : "openai",
-    language: VALID_LANGUAGES.has(language) ? language : "auto",
     // Default must mirror the runtime check in main.js (cleanup runs unless
     // CLEANUP_ENABLED === "false"), or a fresh install's first Save would
     // silently write =false and turn off the tidy-up that had been running.
@@ -163,9 +160,6 @@ export function patchFromView(payload = {}) {
   const patch = {};
   if (typeof payload.provider === "string" && VALID_PROVIDERS.has(payload.provider)) {
     patch.STT_PROVIDER = payload.provider;
-  }
-  if (typeof payload.language === "string" && VALID_LANGUAGES.has(payload.language)) {
-    patch.WHISPER_LANGUAGE = payload.language;
   }
   if (typeof payload.cleanupEnabled === "boolean") {
     patch.CLEANUP_ENABLED = payload.cleanupEnabled ? "true" : "false";

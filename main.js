@@ -89,6 +89,10 @@ let serverPort = null;
 let serverError = null;
 /** @type {{ stop: () => void } | null} */
 let hotkeyEngine = null;
+// Module-scoped so shutdownAll() can clear a pending max-hold watchdog on quit —
+// a closure-local timer would outlive teardown and fire on a destroyed window.
+/** @type {ReturnType<typeof setTimeout> | null} */
+let maxHoldTimer = null;
 // True when the global hotkey failed to start. Without it the app LOOKS alive
 // (tray, splash "Ready") while every key-hold silently does nothing — so the
 // tooltip and splash must tell the truth instead.
@@ -228,13 +232,24 @@ function stripWhisperNoiseTokens(/** @type {string} */ text) {
   return out.replace(/\s+/g, " ").trim();
 }
 
-function makeTrayIcon(/** @type {string} */ language) {
+/** @type {Electron.NativeImage | null} */
+let trayIconCache = null;
+
+function makeTrayIcon() {
+  // The icon is a single static template image now, so build it once and reuse
+  // it — updateTrayTooltip and the power-monitor re-assert call this on a hot-ish
+  // path, and re-reading the PNG (+ @2x) from disk every time is wasted I/O.
+  if (trayIconCache) return trayIconCache;
   try {
-    // No dedicated "auto" art — fall back to the app icon for auto mode so the
-    // tray doesn't claim a specific language.
-    const file = language === "en" ? "tray-en.png" : language === "hr" ? "tray-hr.png" : "tray.ico";
-    const img = nativeImage.createFromPath(join(__dirname, "public", file));
-    if (!img.isEmpty()) return img;
+    // A single soundwave glyph. It's a macOS template image (black shape + alpha),
+    // so macOS tints it to match the menu bar and it stays subtle in light or dark
+    // mode. createFromPath picks up the @2x file automatically for Retina.
+    const img = nativeImage.createFromPath(join(__dirname, "public", "trayTemplate.png"));
+    if (!img.isEmpty()) {
+      img.setTemplateImage(true);
+      trayIconCache = img;
+      return img;
+    }
   } catch {}
   return nativeImage.createEmpty();
 }
@@ -790,69 +805,45 @@ function createDictationWindow() {
   dictationWindow.loadURL(`http://127.0.0.1:${serverPort}/dictation.html?provider=${provider}`);
 }
 
-// Languages cycled by the right-Ctrl tap. Stored in process.env so deepgram.js
-// can read the latest value on every new connection without an IPC round-trip.
-// "auto" (the default) races parallel hr+en Deepgram connections and keeps the
-// more confident transcript; hr/en remain as manual overrides.
-const DICTATION_LANGUAGES = ["auto", "hr", "en"];
-
-function getCurrentLanguage() {
-  return (process.env.WHISPER_LANGUAGE || DICTATION_LANGUAGES[0]).toLowerCase();
-}
-
-/** Human label for a language code, used in the tooltip + toggle notification. */
-function languageLabel(lang) {
-  if (lang === "hr") return "Croatian";
-  if (lang === "en") return "English";
-  return "Auto (Croatian + English)";
-}
-
-function toggleLanguage() {
-  const current = getCurrentLanguage();
-  const idx = DICTATION_LANGUAGES.indexOf(current);
-  const next = DICTATION_LANGUAGES[(idx + 1) % DICTATION_LANGUAGES.length];
-  process.env.WHISPER_LANGUAGE = next;
-  // Persist so the choice survives a restart (auto-detect is unreliable for short
-  // Croatian, so a user who forces HR expects it to stick). Surgical .env write.
-  try { writeEnvFile(envPath, { WHISPER_LANGUAGE: next }); } catch (err) {
-    console.error("[main] could not persist language:", err && err.message);
-  }
-  debug("[main] language toggled " + current + " -> " + next);
-  updateTrayTooltip();
-  // Brief on-screen confirmation — the tray icon is easy to miss, and forcing the
-  // language is now the reliable way to get Croatian, so the user needs to SEE it.
-  try {
-    if (Notification.isSupported()) {
-      new Notification({ title: "GVoice — dictation language", body: languageLabel(next) }).show();
-    }
-  } catch {}
-  return next;
-}
+// Dictation is English-only: the bundled local model is ggml-small.en (English),
+// so there's no language to choose. whisper-local reads WHISPER_LANGUAGE from
+// process.env on every transcription, so lock it here at module load — before the
+// relay starts — overriding whatever an older .env left behind.
+const DICTATION_LANGUAGE = "en";
+process.env.WHISPER_LANGUAGE = DICTATION_LANGUAGE;
 
 function updateTrayTooltip() {
   if (!tray) return;
-  const lang = getCurrentLanguage();
   if (hotkeyFailed) {
     tray.setToolTip("GVoice — the dictation key couldn't start.\nQuit and reopen the app. Details: debug.log");
-    try { tray.setImage(makeTrayIcon(lang)); } catch {}
+    try { tray.setImage(makeTrayIcon()); } catch {}
     return;
   }
   const keyLabel = process.platform === "darwin" ? "right Option" : "Ctrl+Shift";
-  tray.setToolTip(
-    `Language: ${languageLabel(lang)}\n` +
-    `Hold ${keyLabel} to dictate.\n` +
-    `Tap right Ctrl to cycle Auto / Croatian / English.`
-  );
-  try { tray.setImage(makeTrayIcon(lang)); } catch {}
+  tray.setToolTip(`GVoice\nHold ${keyLabel} to dictate.`);
+  try { tray.setImage(makeTrayIcon()); } catch {}
 }
+
+// Longest a single push-to-talk hold can run before we assume the key-up event
+// was lost (a dropped global-hook event on a Space switch, screen lock, or fast
+// modifier combo) and end the recording ourselves. Real dictations are seconds
+// long; this only ever fires on a stuck hold. Without it a single missed key-up
+// leaves the session permanently "busy" and EVERY later press is silently
+// ignored — the app looks dead while the process is healthy.
+const MAX_HOLD_MS = 90000;
 
 async function setupHotkey() {
   if (!serverPort || !dictationWindow) return false;
   try {
     const fireRelease = (/** @type {string} */ source) => {
+      if (maxHoldTimer) { clearTimeout(maxHoldTimer); maxHoldTimer = null; }
       if (!dictation.release()) return;
       dlog("release", { source });
       debug("[main] dictation:stop (" + source + ")");
+      // Guard like every other webContents.send in this file: a max-hold timer
+      // (or a late real release) can fire during teardown, after the window is
+      // gone, and an unguarded send throws "Object has been destroyed".
+      if (!dictationWindow || dictationWindow.isDestroyed()) return;
       dictationWindow.webContents.send("dictation:stop");
       // Keep the pill visible but switch it to the pulsing-blue "Transcribing…"
       // state so the user can see work is still happening. A terminal event
@@ -874,25 +865,27 @@ async function setupHotkey() {
         correctionWatcher.disarm();
         recentTypedWords = [];
         hideVocab();
-        const profile = { language: getCurrentLanguage(), model: process.env.DEEPGRAM_MODEL || "nova-3" };
+        const profile = { language: DICTATION_LANGUAGE, model: process.env.DEEPGRAM_MODEL || "nova-3" };
         savedForegroundHwnd = captureForegroundWindow();
         dlog("press", { profile, hwnd: savedForegroundHwnd });
         debug("[main] dictation:start lang=" + profile.language + " (hwnd=" + savedForegroundHwnd + ")");
         showPillForWindow(savedForegroundHwnd);
         dictationWindow.webContents.send("dictation:start", profile);
+        // Self-heal a lost key-up: if the hold never reports a release, end it
+        // the same way a real release would (commit + transcribe + re-open the
+        // session) so a dropped event can't jam dictation until the next quit.
+        if (maxHoldTimer) clearTimeout(maxHoldTimer);
+        maxHoldTimer = setTimeout(() => fireRelease("max-hold"), MAX_HOLD_MS);
       },
       onRelease: () => {
         fireRelease("hotkey");
-      },
-      onToggleLanguage: () => {
-        toggleLanguage();
       }
     });
     updateTrayTooltip();
     const altLabel = process.platform === "darwin"
       ? "right Option (⌥), left Ctrl+Cmd, or mouse back button"
       : "Ctrl+Shift (either side)";
-    console.log(`Global hotkeys active: hold ${altLabel} to dictate, tap right Ctrl to toggle hr/en.`);
+    console.log(`Global hotkeys active: hold ${altLabel} to dictate.`);
     return true;
   } catch (error) {
     hotkeyFailed = true;
@@ -1547,7 +1540,7 @@ function setupPowerMonitor() {
         createTray();
         console.error("[main] tray recreated after " + reason + " (was " + state + ")");
       } else {
-        tray.setImage(makeTrayIcon(getCurrentLanguage()));
+        tray.setImage(makeTrayIcon());
       }
     } catch (err) {
       console.error("[main] tray re-assert failed:", err && err.message);
@@ -1561,7 +1554,7 @@ function setupPowerMonitor() {
 }
 
 function createTray() {
-  tray = new Tray(makeTrayIcon(getCurrentLanguage()));
+  tray = new Tray(makeTrayIcon());
   updateTrayTooltip();
   rebuildTrayMenu();
 }
@@ -1940,6 +1933,7 @@ app.on("window-all-closed", (event) => {
 // after the app is closed). Synchronous so it completes even if the app exits
 // immediately after.
 function shutdownAll() {
+  if (maxHoldTimer) { clearTimeout(maxHoldTimer); maxHoldTimer = null; }
   if (hotkeyEngine && typeof hotkeyEngine.stop === "function") {
     try { hotkeyEngine.stop(); } catch {}
   }
