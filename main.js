@@ -504,7 +504,7 @@ function showPillResult(
   /** @type {"success" | "error"} */ state,
   /** @type {string | null} */ transcript,
   /** @type {string | null} */ recordingPath,
-  /** @type {{ reason?: string }} */ opts = {}
+  /** @type {{ reason?: string, uncertain?: boolean }} */ opts = {}
 ) {
   currentTranscript = transcript;
   currentRecordingPath = recordingPath;
@@ -512,12 +512,15 @@ function showPillResult(
   //  - A genuine error (no speech, failed paste, transcribe failure) lingers 30s
   //    so the text/recording stays recoverable from the pill. This is the only
   //    case the pill should sit on screen for a long time.
-  //  - Any success — confirmed-landed OR the common macOS middle case (pasted but
-  //    no readable field to verify it, e.g. browsers / Slack / editors) — means
-  //    the text DID go out, so clear fast (3s, just long enough to register) and
-  //    get out of the way. The text is still in the tray's Recent dictations and
-  //    the ✕ on the pill clears it instantly either way.
-  const holdMs = state === "error" ? 30000 : 3000;
+  //  - A confirmed-landed success (read back and verified) — or a paste into a
+  //    terminal, which we trust — clears fast (3s, just long enough to register)
+  //    and gets out of the way.
+  //  - An UNCERTAIN success — pasted but we couldn't read it back to confirm and
+  //    it wasn't a terminal (browsers / Slack / secure fields) — almost always
+  //    landed, but lingers a bit longer (8s) so a rare silent miss is still
+  //    catchable before the pill clears. The text is in Recent dictations and
+  //    the ✕ clears it instantly either way.
+  const holdMs = state === "error" ? 30000 : opts.uncertain ? 8000 : 3000;
   setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath, holdMs, reason: opts.reason });
   pillWindow?.showInactive();
   // Crash backstop only — must outlive the renderer's own timer so it never
@@ -1028,9 +1031,11 @@ async function processTranscript(transcript, restoreHwnd = null) {
   // The terminal check and the read-back are one AX snapshot (readbackPasteTarget)
   // so a focus change can't make them disagree about which app is focused.
   let verified = null;
+  let isTerminalTarget = false;
   if (pasted) {
     await new Promise((resolve) => setTimeout(resolve, 150)); // let the paste settle
     const { isTerminal, value: fieldValue } = readbackPasteTarget();
+    isTerminalTarget = isTerminal;
     if (!isTerminal && typeof fieldValue === "string") {
       // Normalize what apps auto-substitute (smart quotes, em-dashes, NBSP,
       // collapsed whitespace) so autocorrect can't turn a good paste into a
@@ -1046,7 +1051,12 @@ async function processTranscript(transcript, restoreHwnd = null) {
   dlog("typed", { len: textToType.length, ms: Date.now() - tType, fieldFocused, pasted });
   // verified: true = read back and confirmed, false = read back and missing
   // (already downgraded pasted), null = couldn't read the field to check.
-  return { text: textToType, pasted, verified };
+  // uncertain: pasted, but we could neither read it back to confirm NOR trust
+  // it as a terminal (browser web areas, Slack, secure fields). Almost always
+  // landed, but worth lingering a little longer on the pill so a rare silent
+  // miss is still catchable. Terminals are trusted, so they are NOT uncertain.
+  const uncertain = pasted && verified !== true && !isTerminalTarget;
+  return { text: textToType, pasted, verified, uncertain };
 }
 
 // How many recent recordings to keep on disk — matched to the history length so
@@ -1154,7 +1164,9 @@ function setupIpc() {
             // success keeps the plain "Success" label.
             // Action first: the label can ellipsize, so the instruction must
             // survive truncation.
-            reason: result.pasted ? "" : "Click Copy — the paste didn't land."
+            reason: result.pasted ? "" : "Click Copy — the paste didn't land.",
+            // Pasted-but-unconfirmed (not a terminal): linger a little longer.
+            uncertain: result.uncertain
           }
         );
         // Keep the last 50 dictations on disk and in the tray menu, so a
