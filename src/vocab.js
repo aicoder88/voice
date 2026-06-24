@@ -203,6 +203,42 @@ export function wordsOf(text) {
   return String(text || "").match(WORD_RE) || [];
 }
 
+// Common English words (4+ letters) that a hand-typed "correction" is never a
+// dictionary term for. Without this, relaxing isLikelyCorrection's old
+// capitalized-only rule would nag on ordinary grammar fixes — typing "from"
+// after the engine heard "form", "their"→"there", etc. — since those are
+// near-misses too. A real custom term (a name, a CLI tool, a product) won't be
+// in here, so this suppresses the false-positive class without hiding genuine
+// terms. Lowercased; contraction forms included because the watcher keeps
+// apostrophes.
+const COMMON_WORDS = new Set([
+  "about", "above", "after", "again", "against", "almost", "alone", "along",
+  "already", "also", "although", "always", "among", "another", "answer", "anyone",
+  "anything", "area", "around", "away", "back", "because", "been", "before",
+  "being", "below", "best", "better", "between", "both", "came", "cannot",
+  "change", "come", "could", "couldn't", "course", "does", "doesn't", "doing",
+  "done", "don't", "down", "during", "each", "early", "else", "enough", "even",
+  "ever", "every", "example", "find", "first", "follow", "found", "from", "give",
+  "going", "gone", "good", "great", "group", "hand", "hard", "have", "haven't",
+  "having", "head", "hear", "help", "here", "here's", "high", "home", "hour",
+  "house", "however", "into", "isn't", "it's", "just", "keep", "kind", "know",
+  "large", "last", "late", "later", "least", "leave", "left", "less", "life",
+  "like", "line", "little", "live", "long", "look", "loose", "lose", "made",
+  "make", "many", "mean", "might", "more", "most", "much", "must", "name", "near",
+  "need", "never", "next", "night", "none", "only", "open", "order", "other",
+  "over", "part", "people", "place", "point", "quiet", "quite", "rather", "real",
+  "really", "right", "same", "school", "seem", "seen", "several", "should",
+  "shouldn't", "since", "small", "some", "something", "soon", "sound", "state",
+  "still", "such", "sure", "system", "take", "than", "that", "that's", "their",
+  "them", "then", "there", "there's", "these", "they", "they're", "thing",
+  "think", "this", "those", "though", "three", "through", "time", "today",
+  "together", "took", "toward", "turn", "under", "until", "upon", "used", "using",
+  "very", "want", "wasn't", "water", "well", "went", "were", "we're", "weren't",
+  "what", "when", "where", "which", "while", "white", "whole", "will", "with",
+  "within", "without", "won't", "word", "work", "world", "would", "wouldn't",
+  "year", "your", "you're"
+]);
+
 /**
  * Fix-after-the-fact vocabulary correction. Whisper transcribes naturally (the
  * custom dictionary is NOT fed into its initial prompt anymore — that bias made
@@ -280,12 +316,15 @@ function applyCase(spoken, term) {
  * @returns {string | null}
  */
 export function isLikelyCorrection(typed, recentWords) {
-  // Require the hand-typed word to start uppercase — a fix of a misheard *name*
-  // (the thing this feature is for) is almost always capitalized. This is the
-  // key guard against nagging on every lowercase word typed in the watch window.
-  if (!typed || typed.length < 4 || !/^\p{Lu}/u.test(typed)) return null;
+  // A hand-typed fix qualifies on the near-miss test below; these filters keep
+  // it from nagging. We deliberately DON'T require the word to start uppercase
+  // anymore — many real corrections are lowercase, especially in terminals and
+  // editors (command and package names like "kubectl", "pnpm", "nginx"). The
+  // load is carried instead by: 4+ letters, not already known (seed/custom) or
+  // dismissed, and not a common English word (a grammar fix is never a term).
+  if (!typed || typed.length < 4) return null;
   const lower = typed.toLowerCase();
-  if (knownSet().has(lower) || dismissedSet().has(lower)) return null;
+  if (knownSet().has(lower) || dismissedSet().has(lower) || COMMON_WORDS.has(lower)) return null;
   for (const rw of recentWords || []) {
     if (!rw || rw.length < 4) continue;
     const rl = rw.toLowerCase();

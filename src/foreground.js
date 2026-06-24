@@ -86,6 +86,10 @@ let CFStringGetCString = null;
 let CFGetTypeID = null;
 /** @type {(() => number) | null} */
 let CFStringGetTypeID = null;
+/** @type {((el: unknown, out: number[]) => number) | null} */
+let AXUIElementGetPid = null;
+/** @type {((pid: number, buf: Buffer, size: number) => number) | null} */
+let proc_pidpath = null;
 /** @type {unknown} */ let kAXFocusedUIElement = null;
 /** @type {unknown} */ let kAXRole = null;
 /** @type {unknown} */ let kAXValue = null;
@@ -114,6 +118,13 @@ if (isMac) {
       "int AXUIElementIsAttributeSettable(void *element, void *attribute, _Out_ bool *settable)"
     );
     AXIsProcessTrusted = AX.func("bool AXIsProcessTrusted(void)");
+    // pid_t is int32. Lets us walk from the focused element back to the app that
+    // owns it, so we can tell when the paste target is a terminal emulator.
+    AXUIElementGetPid = AX.func("int AXUIElementGetPid(void *element, _Out_ int *pid)");
+    // libproc lives in libSystem; proc_pidpath turns a pid into the full
+    // executable path so we can recognise terminals by binary name.
+    const libSystem = koffi.load("/usr/lib/libSystem.B.dylib");
+    proc_pidpath = libSystem.func("int proc_pidpath(int pid, _Out_ char *buffer, uint32_t buffersize)");
 
     // Attribute name constants — created once, intentionally never released.
     kAXFocusedUIElement = CFStringCreateWithCString(null, "AXFocusedUIElement", kCFStringEncodingUTF8);
@@ -231,6 +242,65 @@ export function focusedFieldValue() {
   } catch (err) {
     console.error("[foreground] field value read failed:", err && err.message);
     return null;
+  }
+}
+
+// App names (lowercased) that mean "the paste target is a terminal emulator".
+// Terminals run TUIs (tmux, vim, editors, Claude Code) that draw box borders and
+// wrap lines, so the focused element's on-screen text (AXValue) is a poor place
+// to look for our pasted string — read-back verification gives false negatives
+// there. Recognising the app lets us skip that check and trust the paste instead
+// of flagging a failure. Matched against the .app bundle name and the executable
+// basename only (not the whole path), so an unrelated parent folder can't trip
+// it. Erring toward over-matching is cheap here: a misclassified app just gets a
+// fast success pill instead of a verified one — the text still pasted.
+const TERMINAL_BINARIES = [
+  "iterm", "terminal", "ghostty", "alacritty", "wezterm",
+  "kitty", "warp", "tabby", "hyper"
+];
+
+/**
+ * Is the currently-focused element owned by a terminal emulator? Best-effort —
+ * walks from the focused AX element to its owning process and matches the
+ * executable name. Returns false when we can't tell (AX unavailable / not
+ * trusted / lookup failed), so a non-terminal app is never mistaken for one.
+ *
+ * @returns {boolean}
+ */
+export function focusedAppIsTerminal() {
+  if (!isMac || !AXUIElementCreateSystemWide || !AXUIElementCopyAttributeValue) return false;
+  if (!AXUIElementGetPid || !proc_pidpath) return false;
+  try {
+    if (AXIsProcessTrusted && !AXIsProcessTrusted()) return false;
+    const systemWide = AXUIElementCreateSystemWide();
+    if (!systemWide) return false;
+    try {
+      const focusedOut = [null];
+      if (AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElement, focusedOut) !== 0) return false;
+      const focused = focusedOut[0];
+      if (!focused) return false;
+      try {
+        const pidOut = [0];
+        if (AXUIElementGetPid(focused, pidOut) !== 0 || !pidOut[0]) return false;
+        const buf = Buffer.alloc(4096); // PROC_PIDPATHINFO_MAXSIZE
+        const len = proc_pidpath(pidOut[0], buf, buf.length);
+        if (len <= 0) return false;
+        const path = buf.toString("utf8", 0, len).toLowerCase();
+        // e.g. "/applications/iterm.app/contents/macos/iterm2" → check the
+        // bundle name ("iterm.app") and the executable basename ("iterm2"); for
+        // apps like Warp whose binary is "stable", the bundle name still matches.
+        const bundle = (path.match(/\/([^/]+)\.app\//) || [])[1] || "";
+        const basename = path.slice(path.lastIndexOf("/") + 1);
+        return TERMINAL_BINARIES.some((name) => bundle.includes(name) || basename.includes(name));
+      } finally {
+        CFRelease(focused);
+      }
+    } finally {
+      CFRelease(systemWide);
+    }
+  } catch (err) {
+    console.error("[foreground] terminal check failed:", err && err.message);
+    return false;
   }
 }
 

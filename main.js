@@ -44,7 +44,7 @@ import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
 import * as vocab from "./src/vocab.js";
 import { createCorrectionWatcher } from "./src/correction-watch.js";
-import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, focusedFieldValue, isForegroundWindow } from "./src/foreground.js";
+import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, focusedFieldValue, isForegroundWindow, focusedAppIsTerminal } from "./src/foreground.js";
 import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
 import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-local.js";
 import { ENV_FILE, MODELS_DIR, BIN_DIR } from "./src/bootstrap-env.js";
@@ -504,20 +504,20 @@ function showPillResult(
   /** @type {"success" | "error"} */ state,
   /** @type {string | null} */ transcript,
   /** @type {string | null} */ recordingPath,
-  /** @type {{ uncertain?: boolean, reason?: string }} */ opts = {}
+  /** @type {{ reason?: string }} */ opts = {}
 ) {
   currentTranscript = transcript;
   currentRecordingPath = recordingPath;
   // How long the pill lingers before the renderer auto-hides it.
   //  - A genuine error (no speech, failed paste, transcribe failure) lingers 30s
-  //    so the text/recording stays recoverable from the pill.
-  //  - A confirmed-landed success clears fast (6s — it worked, get out of the way).
-  //  - The common macOS middle case — pasted, but no readable field to verify it
-  //    landed (browsers / Slack / editors) — used to also sit 30s, which felt as
-  //    sticky as a failure. It almost always DID land, and the text is still in
-  //    the tray's Recent dictations if it didn't, so give it a short-ish 10s. The
-  //    new ✕ on the pill lets the user clear any of these instantly.
-  const holdMs = state === "error" ? 30000 : opts.uncertain ? 10000 : 6000;
+  //    so the text/recording stays recoverable from the pill. This is the only
+  //    case the pill should sit on screen for a long time.
+  //  - Any success — confirmed-landed OR the common macOS middle case (pasted but
+  //    no readable field to verify it, e.g. browsers / Slack / editors) — means
+  //    the text DID go out, so clear fast (3s, just long enough to register) and
+  //    get out of the way. The text is still in the tray's Recent dictations and
+  //    the ✕ on the pill clears it instantly either way.
+  const holdMs = state === "error" ? 30000 : 3000;
   setPillState(state, { canCopy: !!transcript, canOpen: !!recordingPath, holdMs, reason: opts.reason });
   pillWindow?.showInactive();
   // Crash backstop only — must outlive the renderer's own timer so it never
@@ -1020,8 +1020,13 @@ async function processTranscript(transcript, restoreHwnd = null) {
   // check our text actually appeared in it. Only DOWNGRADE on a readable string
   // that's missing the text — null means "couldn't verify" (web areas, secure
   // fields), which must never turn a good paste into a false error.
+  // Terminals draw TUIs (tmux, vim, editors, Claude Code) whose on-screen text
+  // is full of box borders and line wraps, so reading it back and looking for
+  // our pasted string gives false negatives. fieldFocused already confirmed an
+  // editable area, so skip the read-back for terminals and trust the paste —
+  // the alternative was a sticky false "paste failed" error on every terminal.
   let verified = null;
-  if (pasted) {
+  if (pasted && !focusedAppIsTerminal()) {
     await new Promise((resolve) => setTimeout(resolve, 150)); // let the paste settle
     const fieldValue = focusedFieldValue();
     if (typeof fieldValue === "string") {
@@ -1134,16 +1139,15 @@ function setupIpc() {
         console.error("[main] transcript was noise-only, dropped");
         hidePill();
       } else {
-        // Success only when we're confident the text was pasted somewhere;
-        // otherwise show Error so the user can Copy it / open the recording.
-        // A success we couldn't verify landed (verified !== true) lingers like an
-        // error so a silent miss is still recoverable from the pill.
+        // Success when the text was pasted somewhere (verified or not — a paste
+        // we couldn't read back, e.g. into a terminal or browser, still landed
+        // almost every time and clears fast). Only a real miss shows Error, which
+        // lingers so the text stays recoverable via Copy / the recording.
         showPillResult(
           result.pasted ? "success" : "error",
           result.text,
           recordingPath,
           {
-            uncertain: result.pasted && result.verified !== true,
             // Only the hard-miss case gets an explanatory reason; a confirmed
             // success keeps the plain "Success" label.
             // Action first: the label can ellipsize, so the instruction must
