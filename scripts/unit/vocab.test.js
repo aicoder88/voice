@@ -99,13 +99,20 @@ test("isLikelyCorrection: a capitalized near-miss of a recent word matches", () 
   }
 });
 
-test("isLikelyCorrection: rejects lowercase, too-short, exact, and far words", () => {
+test("isLikelyCorrection: accepts lowercase tool names; rejects too-short, exact, far, and common words", () => {
   const { cleanup } = freshStore();
   try {
-    assert.equal(vocab.isLikelyCorrection("debezum", ["Debezium"]), null); // lowercase
-    assert.equal(vocab.isLikelyCorrection("Cat", ["Catt"]), null);          // < 4 chars
-    assert.equal(vocab.isLikelyCorrection("Debezium", ["Debezium"]), null); // exact, not a fix
-    assert.equal(vocab.isLikelyCorrection("Banana", ["Computer"]), null);   // too far
+    // Lowercase corrections now qualify — terminal/editor tool and package names
+    // (kubectl, pnpm, nginx) are rarely typed capitalized, so a lowercase
+    // near-miss of a recent word is a genuine fix, not noise.
+    assert.equal(vocab.isLikelyCorrection("kubctl", ["kubectl"]), "kubectl"); // lowercase tool name
+    assert.equal(vocab.isLikelyCorrection("Cat", ["Catt"]), null);            // < 4 chars
+    assert.equal(vocab.isLikelyCorrection("Debezium", ["Debezium"]), null);   // exact, not a fix
+    assert.equal(vocab.isLikelyCorrection("Banana", ["Computer"]), null);     // too far
+    // A common English word is never a custom term: typing "from" after GVoice
+    // heard "form" is a grammar fix and must not nag, even though it's a 1-edit
+    // near-miss — this is what the COMMON_WORDS stoplist guards against.
+    assert.equal(vocab.isLikelyCorrection("from", ["form"]), null);           // common word
   } finally {
     cleanup();
   }

@@ -133,6 +133,46 @@ const PROBE_MS = Number(window.DICTATION_PROBE_MS || 500);
 // main process to escalate (reload the renderer, then relaunch the app).
 const MAX_PROBE_ROUNDS = Number(window.DICTATION_RECOVERY_ROUNDS || 5);
 
+// A mic that drops idle (e.g. a USB re-enumeration blip, sleep/wake) almost
+// always heals itself within a few seconds — and the device re-appearing on the
+// bus is hardware-paced, so we can't make it faster. Showing the red
+// "disconnected" warning the instant the track ends therefore alarms the user
+// over a problem that's already fixing itself: the warning sits on screen the
+// whole time recovery is walking candidate devices, then clears — exactly the
+// "disconnected even after I plugged it back in" complaint. So for an IDLE drop
+// we stay silent and let auto-recovery either succeed quietly (no warning ever)
+// or surface its own accurate message on a terminal branch (muted / gave up).
+// Only a drop MID-HOLD warns instantly — there the user is waiting on a
+// transcript that will never arrive and needs to know to press again. This
+// backstop covers the rare case where an idle recovery drags on without yet
+// hitting a terminal branch: after this long with no live mic, warn anyway.
+const MIC_WARNING_GRACE_MS = Number(window.DICTATION_MIC_WARN_GRACE_MS || 8000);
+let micWarningTimer = null;
+
+// Cancel a pending (grace-delayed) mic warning — call when the mic recovers, a
+// press takes over, or a more specific warning is about to be sent instead.
+function clearPendingMicWarning() {
+  if (micWarningTimer) {
+    clearTimeout(micWarningTimer);
+    micWarningTimer = null;
+  }
+}
+
+// Surface a mic warning to the user. `immediate` (a mid-hold drop) shows it now;
+// otherwise it's deferred by the grace window so a self-healing blip never
+// alarms — recovery clears it first. Either way, only one warning is pending.
+function sendMicWarningDeferred(reason, immediate) {
+  clearPendingMicWarning();
+  if (immediate) {
+    window.dictationBridge.sendMicWarning(reason);
+    return;
+  }
+  micWarningTimer = setTimeout(() => {
+    micWarningTimer = null;
+    window.dictationBridge.sendMicWarning(reason);
+  }, MIC_WARNING_GRACE_MS);
+}
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -515,8 +555,17 @@ function teardownCapture(full = false) {
 // The mic died or was taken (track ended/muted, or a run of silent holds).
 // Drop the dead pipeline, surface a visible warning, and reset so the next
 // press re-acquires. Safe to call mid-hold: we just abandon the current one.
-function handleMicLost(reason) {
+function handleMicLost(reason, immediate = false) {
   log("Mic lost: " + reason);
+  // Decide NOW, before the reset below, whether the user is waiting on a result
+  // and so must be warned immediately rather than after the grace window:
+  //  - `immediate` — the caller knows it's a user-facing failure. finishUtterance
+  //    passes this for the dead-mic verdict: the user just held the key, spoke,
+  //    and got nothing, and by then isRecording is already false (stopRecording
+  //    cleared it before the tail-drain), so we can't infer it from state.
+  //  - isRecording — the mic died mid-hold (an onended/onmute during a take).
+  // Otherwise it's an idle background drop, which usually self-heals — defer.
+  const warnNow = immediate || isRecording;
   isRecording = false;
   // Cancel a pending tail-drain commit: finishUtterance on a torn-down
   // pipeline would double-report (failure pill over this mic warning).
@@ -536,7 +585,9 @@ function handleMicLost(reason) {
     try { socket.close(); } catch {}
   }
   socket = null;
-  window.dictationBridge.sendMicWarning(reason);
+  // User waiting (mid-hold or post-hold dead-mic verdict): warn now. Idle drop:
+  // defer — recovery below almost always heals it first, so no warning shows.
+  sendMicWarningDeferred(reason, warnNow);
   // Don't just wait for the next key-press to retry — heal in the background so
   // the mic is live again before the user presses. (No-op if already recovering
   // or a hold is in progress.)
@@ -646,6 +697,9 @@ async function recoverMic(reason) {
         captureStale = false;
         setStatus("Ready");
         log("Mic recovered (round " + round + ") on " + currentLabel);
+        // Beat the grace-delayed warning: the mic is back, so a deferred
+        // "disconnected" notice must never fire after this.
+        clearPendingMicWarning();
         window.dictationBridge.sendMicRecovered();
         return;
       }
@@ -656,6 +710,9 @@ async function recoverMic(reason) {
       // the last candidate tried). Tell the user to unmute instead of escalating.
       if (recoveryMutedSeen) {
         log("Mic appears muted — warning instead of escalating");
+        // Replace any pending generic "disconnected" notice with this specific
+        // (and actionable) one rather than letting both fire.
+        clearPendingMicWarning();
         window.dictationBridge.sendMicWarning("Your microphone is muted — unmute it (the device switch, or System Settings → Sound → Input).");
         return;
       }
@@ -685,6 +742,9 @@ async function startRecording(profile) {
   if (isRecording || startInFlight) return;
   startInFlight = true;
   stopRequested = false;
+  // A press supersedes any pending grace-delayed mic warning — it must not pop
+  // a "disconnected" notice in the middle of a fresh dictation.
+  clearPendingMicWarning();
   holdStartedAt = Date.now();
   // If recovery is mid-rebuild, wait it out — it sees startInFlight and stops
   // after this build, so we won't race it into a second (stacked) graph.
@@ -848,7 +908,10 @@ function finishUtterance() {
     const reason = utterancePeak === 0
       ? "No sound is reaching GVoice. Open System Settings → Sound → Input and pick your microphone, then press again."
       : "Mic restarted — press and try again.";
-    handleMicLost(reason);
+    // The user just spoke and got nothing — warn immediately, not after the
+    // grace window (isRecording is already false here, so handleMicLost can't
+    // infer "user is waiting" on its own).
+    handleMicLost(reason, true);
     return;
   }
 
