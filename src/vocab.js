@@ -329,6 +329,13 @@ export function isLikelyCorrection(typed, recentWords) {
     if (!rw || rw.length < 4) continue;
     const rl = rw.toLowerCase();
     if (rl === lower) continue;
+    // If the word GVoice typed is itself a common word, a near-miss the user
+    // typed is almost always a grammar/homophone fix (heard "form", typed
+    // "from"), not a custom term — a custom term gets mis-transcribed INTO a
+    // rare non-word, not into an everyday word. This catches the whole
+    // homophone class from the misheard side, even when the typed word isn't
+    // in COMMON_WORDS.
+    if (COMMON_WORDS.has(rl)) continue;
     const d = levenshtein(lower, rl);
     if (d > 0 && d <= 2 && d <= Math.ceil(Math.max(lower.length, rl.length) * 0.4)) {
       return rw;

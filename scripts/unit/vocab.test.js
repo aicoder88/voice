@@ -118,6 +118,23 @@ test("isLikelyCorrection: accepts lowercase tool names; rejects too-short, exact
   }
 });
 
+test("isLikelyCorrection: a near-miss of a COMMON misheard word never nags", () => {
+  const { cleanup } = freshStore();
+  try {
+    // The misheard-word guard: if the word GVoice typed is itself common, a
+    // typed near-miss is a grammar/homophone fix, not a custom term — even when
+    // the TYPED word isn't in the stoplist. Bounds the false-positive class that
+    // dropping the uppercase-only rule would otherwise reopen.
+    assert.equal(vocab.isLikelyCorrection("form", ["from"]), null);  // misheard "from" is common
+    assert.equal(vocab.isLikelyCorrection("thier", ["their"]), null); // misheard "their" is common
+    assert.equal(vocab.isLikelyCorrection("wokr", ["work"]), null);   // misheard "work" is common
+    // But a real lowercase term whose misheard form is NOT common still qualifies.
+    assert.equal(vocab.isLikelyCorrection("kubctl", ["kubectl"]), "kubectl");
+  } finally {
+    cleanup();
+  }
+});
+
 test("correctTranscript: fixes a genuine near-miss to the canonical spelling", () => {
   const { cleanup } = freshStore();
   try {

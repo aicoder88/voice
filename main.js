@@ -44,7 +44,7 @@ import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
 import * as vocab from "./src/vocab.js";
 import { createCorrectionWatcher } from "./src/correction-watch.js";
-import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, focusedFieldValue, isForegroundWindow, focusedAppIsTerminal } from "./src/foreground.js";
+import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, isForegroundWindow, readbackPasteTarget } from "./src/foreground.js";
 import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
 import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-local.js";
 import { ENV_FILE, MODELS_DIR, BIN_DIR } from "./src/bootstrap-env.js";
@@ -1025,11 +1025,13 @@ async function processTranscript(transcript, restoreHwnd = null) {
   // our pasted string gives false negatives. fieldFocused already confirmed an
   // editable area, so skip the read-back for terminals and trust the paste —
   // the alternative was a sticky false "paste failed" error on every terminal.
+  // The terminal check and the read-back are one AX snapshot (readbackPasteTarget)
+  // so a focus change can't make them disagree about which app is focused.
   let verified = null;
-  if (pasted && !focusedAppIsTerminal()) {
+  if (pasted) {
     await new Promise((resolve) => setTimeout(resolve, 150)); // let the paste settle
-    const fieldValue = focusedFieldValue();
-    if (typeof fieldValue === "string") {
+    const { isTerminal, value: fieldValue } = readbackPasteTarget();
+    if (!isTerminal && typeof fieldValue === "string") {
       // Normalize what apps auto-substitute (smart quotes, em-dashes, NBSP,
       // collapsed whitespace) so autocorrect can't turn a good paste into a
       // false error.

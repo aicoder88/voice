@@ -198,14 +198,21 @@ export function isEditableFieldFocused() {
 }
 
 /**
- * Read the text content (AXValue) of the currently-focused element, so a
- * caller can verify a paste actually landed. Best-effort: many elements
- * (web areas, secure fields, custom editors) don't expose a string value.
+ * Run `cb` with the currently-focused AX element, owning the shared
+ * acquire-and-release dance: trust check → system-wide element → focused
+ * element → CFRelease both (even if `cb` throws). Returns whatever `cb`
+ * returns, or null when the focused element can't be reached (not mac / AX
+ * unavailable / not trusted / nothing focused).
  *
- * @returns {string | null}  the field's text, or null if it can't be read —
- *   callers must treat null as "couldn't verify", never as "paste failed".
+ * isEditableFieldFocused intentionally does NOT use this — it needs to tell a
+ * transient AX error (⇒ null, "couldn't verify") from a genuine "nothing
+ * focused" (⇒ false), which means inspecting the AX error code directly.
+ *
+ * @template T
+ * @param {(focused: unknown) => T} cb
+ * @returns {T | null}
  */
-export function focusedFieldValue() {
+function withFocusedElement(cb) {
   if (!isMac || !AXUIElementCreateSystemWide || !AXUIElementCopyAttributeValue) return null;
   try {
     if (AXIsProcessTrusted && !AXIsProcessTrusted()) return null;
@@ -217,22 +224,7 @@ export function focusedFieldValue() {
       const focused = focusedOut[0];
       if (!focused) return null;
       try {
-        const valueOut = [null];
-        if (AXUIElementCopyAttributeValue(focused, kAXValue, valueOut) !== 0 || !valueOut[0]) return null;
-        try {
-          // AXValue isn't always a string (sliders/checkboxes return numbers).
-          // Calling CFStringGetCString on a non-string is undefined behavior,
-          // so type-check first.
-          if (!CFGetTypeID || !CFStringGetTypeID || CFGetTypeID(valueOut[0]) !== CFStringGetTypeID()) return null;
-          // Large enough for any realistic dictation target; CFStringGetCString
-          // returns false (→ null) if the value doesn't fit.
-          const buf = Buffer.alloc(256 * 1024);
-          if (!CFStringGetCString(valueOut[0], buf, buf.length, kCFStringEncodingUTF8)) return null;
-          const end = buf.indexOf(0);
-          return buf.toString("utf8", 0, end < 0 ? buf.length : end);
-        } finally {
-          CFRelease(valueOut[0]);
-        }
+        return cb(focused);
       } finally {
         CFRelease(focused);
       }
@@ -240,8 +232,31 @@ export function focusedFieldValue() {
       CFRelease(systemWide);
     }
   } catch (err) {
-    console.error("[foreground] field value read failed:", err && err.message);
+    console.error("[foreground] focused-element access failed:", err && err.message);
     return null;
+  }
+}
+
+// Read the AXValue of an already-acquired focused element as a string, or null
+// when it isn't a readable string (sliders/checkboxes return numbers; web areas
+// and secure fields expose nothing). Caller owns `focused`'s lifetime; this only
+// releases the value it copies.
+function readFocusedStringValue(/** @type {unknown} */ focused) {
+  const valueOut = [null];
+  if (AXUIElementCopyAttributeValue(focused, kAXValue, valueOut) !== 0 || !valueOut[0]) return null;
+  try {
+    // AXValue isn't always a string (sliders/checkboxes return numbers).
+    // Calling CFStringGetCString on a non-string is undefined behavior,
+    // so type-check first.
+    if (!CFGetTypeID || !CFStringGetTypeID || CFGetTypeID(valueOut[0]) !== CFStringGetTypeID()) return null;
+    // Large enough for any realistic dictation target; CFStringGetCString
+    // returns false (→ null) if the value doesn't fit.
+    const buf = Buffer.alloc(256 * 1024);
+    if (!CFStringGetCString(valueOut[0], buf, buf.length, kCFStringEncodingUTF8)) return null;
+    const end = buf.indexOf(0);
+    return buf.toString("utf8", 0, end < 0 ? buf.length : end);
+  } finally {
+    CFRelease(valueOut[0]);
   }
 }
 
@@ -250,58 +265,59 @@ export function focusedFieldValue() {
 // wrap lines, so the focused element's on-screen text (AXValue) is a poor place
 // to look for our pasted string — read-back verification gives false negatives
 // there. Recognising the app lets us skip that check and trust the paste instead
-// of flagging a failure. Matched against the .app bundle name and the executable
-// basename only (not the whole path), so an unrelated parent folder can't trip
-// it. Erring toward over-matching is cheap here: a misclassified app just gets a
-// fast success pill instead of a verified one — the text still pasted.
-const TERMINAL_BINARIES = [
-  "iterm", "terminal", "ghostty", "alacritty", "wezterm",
-  "kitty", "warp", "tabby", "hyper"
-];
+// of flagging a failure. Matched EXACTLY against the .app bundle name and the
+// executable basename (e.g. "iterm" and "iterm2") — never a substring — so an
+// app merely *containing* one of these words ("Terminal Velocity",
+// "Hyperplanning") is NOT mistaken for a terminal and keeps its read-back check.
+// The bundle name alone covers every listed app; the extra binary basenames are
+// the fallback for a terminal binary launched outside a .app wrapper.
+const TERMINAL_BINARIES = new Set([
+  "iterm", "iterm2", "terminal", "ghostty", "alacritty", "wezterm",
+  "wezterm-gui", "kitty", "warp", "tabby", "hyper"
+]);
+
+// libproc's max path size. One reusable scratch buffer: proc_pidpath writes a
+// fresh NUL-terminated path each call, so reuse is safe and avoids allocating
+// 4KB on every paste.
+const pidPathBuf = Buffer.alloc(4096); // PROC_PIDPATHINFO_MAXSIZE
+
+// Is `focused` (an already-acquired AX element) owned by a terminal emulator?
+// Walks element → owning pid → executable path and matches the app/binary name.
+// False whenever we can't tell, so a non-terminal app is never mistaken for one.
+function elementIsTerminal(/** @type {unknown} */ focused) {
+  if (!AXUIElementGetPid || !proc_pidpath) return false;
+  const pidOut = [0];
+  if (AXUIElementGetPid(focused, pidOut) !== 0 || !pidOut[0]) return false;
+  const len = proc_pidpath(pidOut[0], pidPathBuf, pidPathBuf.length);
+  if (len <= 0) return false;
+  const path = pidPathBuf.toString("utf8", 0, len).toLowerCase();
+  // e.g. "/applications/iterm.app/contents/macos/iterm2" → bundle "iterm",
+  // basename "iterm2". Exact match against each (not substring — see above).
+  const bundle = (path.match(/\/([^/]+)\.app\//) || [])[1] || "";
+  const basename = path.slice(path.lastIndexOf("/") + 1);
+  return TERMINAL_BINARIES.has(bundle) || TERMINAL_BINARIES.has(basename);
+}
 
 /**
- * Is the currently-focused element owned by a terminal emulator? Best-effort —
- * walks from the focused AX element to its owning process and matches the
- * executable name. Returns false when we can't tell (AX unavailable / not
- * trusted / lookup failed), so a non-terminal app is never mistaken for one.
+ * Verify a just-completed paste from ONE focused-element snapshot: decide
+ * whether the target is a terminal AND (if not) read its text back. Doing both
+ * in a single AX traversal means the terminal classification and the read-back
+ * can't disagree about which app is focused (a focus change between two separate
+ * traversals used to be able to flip the result), and a non-terminal paste no
+ * longer pays for two separate system-wide traversals.
  *
- * @returns {boolean}
+ * @returns {{ isTerminal: boolean, value: string | null }}
+ *   isTerminal — skip read-back verification and trust the paste.
+ *   value — the focused field's text, or null when it can't be read (callers
+ *   must treat null as "couldn't verify", never as a failed paste). Always
+ *   {isTerminal:false, value:null} when AX is unavailable / not trusted.
  */
-export function focusedAppIsTerminal() {
-  if (!isMac || !AXUIElementCreateSystemWide || !AXUIElementCopyAttributeValue) return false;
-  if (!AXUIElementGetPid || !proc_pidpath) return false;
-  try {
-    if (AXIsProcessTrusted && !AXIsProcessTrusted()) return false;
-    const systemWide = AXUIElementCreateSystemWide();
-    if (!systemWide) return false;
-    try {
-      const focusedOut = [null];
-      if (AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElement, focusedOut) !== 0) return false;
-      const focused = focusedOut[0];
-      if (!focused) return false;
-      try {
-        const pidOut = [0];
-        if (AXUIElementGetPid(focused, pidOut) !== 0 || !pidOut[0]) return false;
-        const buf = Buffer.alloc(4096); // PROC_PIDPATHINFO_MAXSIZE
-        const len = proc_pidpath(pidOut[0], buf, buf.length);
-        if (len <= 0) return false;
-        const path = buf.toString("utf8", 0, len).toLowerCase();
-        // e.g. "/applications/iterm.app/contents/macos/iterm2" → check the
-        // bundle name ("iterm.app") and the executable basename ("iterm2"); for
-        // apps like Warp whose binary is "stable", the bundle name still matches.
-        const bundle = (path.match(/\/([^/]+)\.app\//) || [])[1] || "";
-        const basename = path.slice(path.lastIndexOf("/") + 1);
-        return TERMINAL_BINARIES.some((name) => bundle.includes(name) || basename.includes(name));
-      } finally {
-        CFRelease(focused);
-      }
-    } finally {
-      CFRelease(systemWide);
-    }
-  } catch (err) {
-    console.error("[foreground] terminal check failed:", err && err.message);
-    return false;
-  }
+export function readbackPasteTarget() {
+  return withFocusedElement((focused) =>
+    elementIsTerminal(focused)
+      ? { isTerminal: true, value: null }
+      : { isTerminal: false, value: readFocusedStringValue(focused) }
+  ) || { isTerminal: false, value: null };
 }
 
 /**

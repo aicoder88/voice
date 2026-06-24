@@ -142,11 +142,20 @@ const MAX_PROBE_ROUNDS = Number(window.DICTATION_RECOVERY_ROUNDS || 5);
 // "disconnected even after I plugged it back in" complaint. So for an IDLE drop
 // we stay silent and let auto-recovery either succeed quietly (no warning ever)
 // or surface its own accurate message on a terminal branch (muted / gave up).
-// Only a drop MID-HOLD warns instantly — there the user is waiting on a
-// transcript that will never arrive and needs to know to press again. This
-// backstop covers the rare case where an idle recovery drags on without yet
-// hitting a terminal branch: after this long with no live mic, warn anyway.
-const MIC_WARNING_GRACE_MS = Number(window.DICTATION_MIC_WARN_GRACE_MS || 8000);
+// Only a drop MID-HOLD (or during the post-release tail drain) warns instantly —
+// there the user is waiting on a transcript that will never arrive and needs to
+// know to press again.
+//
+// Every terminal branch of recoverMic (recovered / muted / gave-up-escalate)
+// clears this pending warning, so in normal operation recovery always resolves
+// the warning itself. This timer is the LAST-RESORT backstop for the
+// pathological case where recovery never reaches a terminal branch at all (a
+// wedged await that never resolves). It must therefore sit ABOVE the worst-case
+// recovery time — five probe rounds with exponential backoff (≈0.75+1.5+3+6s of
+// sleeps, plus probe time) run past 11s — so a mic that legitimately heals on a
+// late round clears the warning before this ever fires, instead of flashing a
+// false "disconnected" first.
+const MIC_WARNING_GRACE_MS = Number(window.DICTATION_MIC_WARN_GRACE_MS || 20000);
 let micWarningTimer = null;
 
 // Cancel a pending (grace-delayed) mic warning — call when the mic recovers, a
@@ -564,8 +573,11 @@ function handleMicLost(reason, immediate = false) {
   //    and got nothing, and by then isRecording is already false (stopRecording
   //    cleared it before the tail-drain), so we can't infer it from state.
   //  - isRecording — the mic died mid-hold (an onended/onmute during a take).
+  //  - draining — the mic died during the post-release tail drain: the user
+  //    just spoke and is waiting on a transcript this loss will abandon, so
+  //    it's a user-facing failure too (isRecording is already false here).
   // Otherwise it's an idle background drop, which usually self-heals — defer.
-  const warnNow = immediate || isRecording;
+  const warnNow = immediate || isRecording || draining;
   isRecording = false;
   // Cancel a pending tail-drain commit: finishUtterance on a torn-down
   // pipeline would double-report (failure pill over this mic warning).
@@ -718,6 +730,10 @@ async function recoverMic(reason) {
       }
       if (round >= MAX_PROBE_ROUNDS) {
         log("Mic still silent after " + round + " rounds — escalating to main");
+        // Escalation (reload renderer → relaunch app) is this path's own
+        // user-visible response, so drop any pending generic "disconnected"
+        // notice rather than letting it fire alongside the escalation.
+        clearPendingMicWarning();
         window.dictationBridge.requestEscalation(reason || "recovery");
         return;
       }
