@@ -1,3 +1,31 @@
+# Session notes — 2026-06-27: FluidVoice self-correction port
+
+Added spoken self-correction to the cleanup pass (drop retracted words).
+Review gate (adversarial + simplicity subagents over the diff) — merged:
+- Removed the "cancel entirely → empty output" prompt case: dead on arrival
+  (polishTranscript falls back to RAW on empty output, so it pasted the full
+  un-retracted sentence — opposite of intent) and scope creep. Both reviewers.
+- Dropped "delete that" from gate + prompt cues: common literal content
+  ("delete that file") → false routing/latency + over-deletion risk. Kept the
+  idiomatic "scratch that"/"strike that".
+- Dropped bare "rather" from prompt (kept "or rather"): content word.
+- Amended the top "verbatim" rule (it claimed list layout was the ONLY
+  drop-words case) to name the self-correction carve-out — removes a
+  3-way "only exception" contradiction that destabilizes the small model.
+- Centralized the cue regex into exported looksLikeRetraction() (one source of
+  truth, used by main.js gate) + added scripts/unit/cleanup-gate.test.js.
+- Fixed a misleading test (fifty/sixty used bare "no" on a <40-char phrase →
+  would skip cleanup in production; now uses "no wait").
+Rejected: trimming the prompt section for brevity (would break house style /
+consistency with neighboring sections — fails "right regardless").
+Tests after: unit 107/107, cleanup 13/13, syntax OK. NOT committed, NOT shipped.
+
+Rabbit-hole avoided: per-app prompt profiles (the bigger FluidVoice feature)
+deliberately NOT built this pass — it adds a new config-UI window + cross-
+platform app detection; surfaced to user for go-ahead instead of half-shipping.
+
+---
+
 # Session notes — 2026-06-17: polish pass
 
 Ran a 9-dimension find→adversarially-verify review (60-agent workflow): 39 confirmed

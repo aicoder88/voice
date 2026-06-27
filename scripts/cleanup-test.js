@@ -88,6 +88,34 @@ const CASES = [
       return modelRan && sameWords;
     },
     expectDesc: "model ran AND kept words verbatim (active command, no passive rewrite)"
+  },
+  {
+    // Self-correction: the retracted item ("milk") must be dropped, the
+    // replacement ("water") kept. Raw fallback on API failure keeps "milk",
+    // so a failed call fails the test rather than fake-passing.
+    name: "self-correction-replace",
+    input: "buy milk no wait buy water",
+    expect: (out) => /\bwater\b/i.test(out) && !/\bmilk\b/i.test(out),
+    expectDesc: "drops 'milk', keeps 'water'"
+  },
+  {
+    name: "self-correction-number",
+    input: "the price is fifty no wait sixty dollars",
+    expect: (out) => /\b(sixty|60)\b/i.test(out) && !/\b(fifty|50)\b/i.test(out),
+    expectDesc: "drops 'fifty', keeps 'sixty'"
+  },
+  {
+    name: "self-correction-name (actually)",
+    input: "tell John to send it, actually tell Sarah to send it",
+    expect: (out) => /\bsarah\b/i.test(out) && !/\bjohn\b/i.test(out),
+    expectDesc: "drops 'John', keeps 'Sarah'"
+  },
+  {
+    // Negative: "no" here is content, not a retraction — it must survive.
+    name: "no-is-content-not-correction",
+    input: "I asked if we should ship today and the answer is no.",
+    expect: (out) => /\bno\b/i.test(out) && /ship/i.test(out),
+    expectDesc: "keeps content 'no' (not treated as a retraction)"
   }
 ];
 

@@ -44,6 +44,7 @@ import { startServer } from "./server.js";
 import { DictationSession } from "./src/dictation-session.js";
 import * as vocab from "./src/vocab.js";
 import { createCorrectionWatcher } from "./src/correction-watch.js";
+import { looksLikeRetraction } from "./src/cleanup.js";
 import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, isForegroundWindow, readbackPasteTarget } from "./src/foreground.js";
 import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
 import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-local.js";
@@ -941,16 +942,23 @@ async function processTranscript(transcript, restoreHwnd = null) {
   const commaCount = (textToType.match(/,/g) || []).length;
   const hasFiller = /\b(uh|um|uhh|er|erm)\b/i.test(textToType);
   const hasOrdinal = /\b(first|second|third|fourth|fifth|next,|finally,)\b/i.test(textToType);
+  // A spoken self-correction ("buy milk no wait buy water") is usually short and
+  // clean, so the length/filler heuristics below would skip cleanup and paste the
+  // retracted words verbatim. looksLikeRetraction matches only unambiguous
+  // multi-word cues (not a bare "no"/"actually", which the prompt judges in
+  // context) — when one appears, always run cleanup so the retraction is dropped.
+  const hasRetraction = looksLikeRetraction(textToType);
   // Short, clean utterances skip LLM cleanup — they need only a trailing period,
   // not restructuring. The LLM adds value on long or messy dictations; sending
   // short clear phrases to it causes unneeded rewriting.
   const needsCleanup =
-    (textToType.length >= 40 || hasFiller || hasOrdinal || commaCount >= 4) &&
+    (textToType.length >= 40 || hasFiller || hasOrdinal || commaCount >= 4 || hasRetraction) &&
     (textToType.length > 120 ||
      hasFiller ||
      !/[.!?…]$/.test(textToType) ||
      hasOrdinal ||
-     commaCount >= 4);
+     commaCount >= 4 ||
+     hasRetraction);
   if (cleanupEnabled && needsCleanup) {
     const t0 = Date.now();
     try {

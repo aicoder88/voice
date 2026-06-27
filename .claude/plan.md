@@ -1,4 +1,24 @@
-# Polish pass — 2026-06-17 (CURRENT)
+# FluidVoice feature port — 2026-06-27 (CURRENT)
+
+Cross-language (FluidVoice = Swift, GVoice = Electron/JS) → reimplement features,
+not copy code. Parakeet engine out of scope (needs a Swift build; separate project).
+
+Impact-ordered:
+1. [DONE] Self-correction in cleanup — drop spoken retractions ("buy milk no wait
+   buy water" → "Buy water."). Prompt-only change in src/cleanup.js, scoped as the
+   single exception to "preserve every word". Verify with `node scripts/cleanup-test.js`.
+2. [NEXT] Per-app prompt styles — different cleanup style per frontmost app
+   (FluidVoice marquee feature). Needs: getForegroundAppName() in foreground.js,
+   press-time capture threaded to polishTranscript, src/app-prompts.js JSON store,
+   cleanup.js appends per-app instruction, an "App styles…" window mirroring the
+   dictionary window. Adds config-UI surface → confirm with user before building.
+3. [NEXT] Usage stats — words/day, streak, time-saved from history.json. Zero risk.
+
+Out of scope (scope creep on a working app): Command Mode, Rewrite Mode, light theming.
+
+---
+
+# Polish pass — 2026-06-17 (HISTORICAL)
 
 Goal: find mistakes, omissions, polish; fix high-value confirmed ones. App is stable
 and running in /Applications — precision over volume; surface risky internal refactors

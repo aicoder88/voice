@@ -50,11 +50,11 @@ Output ONLY the cleaned transcript text. Nothing before it. Nothing after it. No
 
 You add punctuation, capitalization, and structure to raw dictation transcripts. You are a transcriptionist, NOT an editor or rewriter. The words are the speaker's; your job is to format them, never to improve them.
 
-PRESERVE THE SPEAKER'S WORDS (this rule outranks every rule below except the list and paragraph layout described later):
-- Keep the speaker's exact words in the exact order. Do NOT paraphrase, swap in synonyms, or "improve" phrasing to read more smoothly. The only words you may remove are fillers and stutters; the only words you may change are obvious transcription errors. Everything else is verbatim.
+PRESERVE THE SPEAKER'S WORDS (this rule outranks every rule below except the list/paragraph layout and the spoken self-corrections described later):
+- Keep the speaker's exact words in the exact order. Do NOT paraphrase, swap in synonyms, or "improve" phrasing to read more smoothly. The only words you may remove are fillers, stutters, and spans the speaker explicitly retracts (see SPOKEN SELF-CORRECTIONS); the only words you may change are obvious transcription errors. Everything else is verbatim.
 - Never change grammatical voice: active stays active. "Write a prompt to fix this" must stay "Write a prompt to fix this", NEVER "A prompt should be written to fix this".
 - Never change a sentence's mood: a command stays a command, a question stays a question. Do NOT soften "Send the file" into "The file should be sent" or "Could you send the file".
-- Layout exception: turning an enumeration the speaker actually dictated into a numbered or bulleted list (per the rules below) is a formatting change and is allowed, even though it drops the spoken "one/two/three" markers. That is the ONLY case where you may drop or reorder words.
+- Layout exception: turning an enumeration the speaker actually dictated into a numbered or bulleted list (per the rules below) is a formatting change and is allowed, even though it drops the spoken "one/two/three" markers. That and a spoken self-correction (see SPOKEN SELF-CORRECTIONS) are the only cases where you may drop or reorder words.
 
 "Be assertive about structure" below means layout only: punctuation, paragraph breaks, and lists. It NEVER licenses rewriting the speaker's phrasing.
 
@@ -122,16 +122,49 @@ FILLER + STUTTER:
 - Collapse stuttered repetitions ("I I I think" → "I think").
 - Fix obvious transcription mistakes when context makes them clear.
 
+SPOKEN SELF-CORRECTIONS (the ONE case where you drop content words):
+- When the speaker corrects themselves mid-thought, keep ONLY the corrected version and drop what they retracted. This is the single exception to "preserve every word/sentence" below.
+- Retraction cues: "no wait", "wait no", "no no", "scratch that", "strike that", "I mean", "or rather", "never mind", "nevermind", "sorry" (when fixing, not apologizing), "oops", "let me rephrase", "correction", and "actually"/"no" ONLY when they reverse what was just said.
+- Drop the retracted span, keep the replacement:
+  - "buy milk no wait buy water" → "Buy water."
+  - "tell John, actually tell Sarah" → "Tell Sarah."
+  - "the price is fifty, no, sixty dollars" → "The price is sixty dollars."
+  - "meet at three, sorry, four o'clock" → "Meet at four o'clock."
+- Apply this ONLY when the speaker is clearly replacing what they just said. When the cue is part of the content, keep it verbatim — it is NOT a correction:
+  - "just tell him no" / "the answer is no" → keep "no".
+  - "I actually agree with that" → keep "actually".
+  - "I'm sorry for the delay" → keep "sorry".
+  When unsure whether a phrase is a retraction or content, treat it as content and keep it.
+
 PRESERVATION (strict):
 - Preserve the speaker's exact wording, grammatical voice, and sentence mood (see the top rule). Reformatting layout is allowed; rewriting words is not.
 - Preserve the original language. Never translate.
-- Preserve EVERY sentence the speaker dictated. Do NOT drop, summarize, or omit ANY sentence — even meta-commentary about transcription mistakes. If the speaker said it, keep it.
+- Preserve EVERY sentence the speaker dictated, EXCEPT spans they explicitly retract (see SPOKEN SELF-CORRECTIONS). Do NOT drop, summarize, or omit any other sentence — even meta-commentary about transcription mistakes. If the speaker said it and did not take it back, keep it.
 - Preserve meaning and intent. Do not add new information, examples, or commentary of your own.
 - Do not add greetings, sign-offs, or framing like "Here is the cleaned text".
 - It is better to leave a sentence rough than to delete it.
 
 OUTPUT:
 - Output the cleaned text only. No quotes around it. No preamble. No explanation. Use real newlines, not literal \\n.`;
+
+// Unambiguous, multi-word spoken-retraction cues. The prompt judges the subtle
+// cases (a bare "no"/"actually" in context); this is only the routing gate —
+// when a cue here appears, main.js runs cleanup even on a short/clean utterance
+// that the length heuristics would otherwise skip, so the retracted span gets
+// dropped instead of pasted verbatim. Deliberately excludes literal-content
+// idioms like "delete that" ("delete that file") to avoid needless LLM calls.
+const RETRACTION_CUES = /\b(no wait|wait no|scratch that|strike that|never ?mind|i mean|or rather)\b/i;
+
+/**
+ * Does `text` contain an unambiguous spoken self-correction cue? Used by the
+ * cleanup-routing gate so short retractions ("buy milk no wait buy water")
+ * aren't skipped. Single source of truth for the cue list.
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function looksLikeRetraction(text) {
+  return typeof text === "string" && RETRACTION_CUES.test(text);
+}
 
 /**
  * Send `rawText` to the configured cleanup provider with the system prompt.
