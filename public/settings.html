@@ -5,206 +5,320 @@
     <title>GVoice settings</title>
     <style>
       :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
       html, body {
-        margin: 0;
-        height: 100%;
-        background: #14181e;
-        color: #e7eef5;
+        margin: 0; height: 100%;
+        background: #0f1318; color: #e7eef5;
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         font-size: 14px;
       }
-      body { display: flex; flex-direction: column; }
-      header { padding: 18px 20px 4px; }
-      h1 { font-size: 16px; margin: 0; }
-      .intro {
-        margin: 12px 20px 0; padding: 10px 12px;
-        background: #1b2a3a; border: 1px solid #294a6b; border-radius: 9px;
-        color: #cfe2f5; font-size: 12.5px; line-height: 1.45; display: none;
+      body { display: flex; height: 100vh; overflow: hidden; }
+
+      /* sidebar */
+      .sidebar {
+        width: 200px; flex: none; background: #11161c;
+        border-right: 1px solid #1e2630; display: flex; flex-direction: column; padding: 16px 12px;
       }
-      .form { flex: 1; overflow: auto; padding: 14px 20px 8px; }
-      .field { margin-bottom: 16px; }
-      label.row { display: block; font-weight: 600; margin-bottom: 6px; }
-      .hint { color: #8497a8; font-size: 11.5px; margin-top: 5px; line-height: 1.4; }
-      select, input[type="text"], input[type="password"], input[type="number"] {
-        width: 100%; box-sizing: border-box;
-        background: #1d232b; color: #fff;
-        border: 1px solid #2c3540; border-radius: 9px;
-        padding: 9px 11px; font: inherit; outline: none;
+      .brand { display: flex; align-items: center; gap: 9px; padding: 4px 8px 16px; }
+      .brand .dot { width: 22px; height: 22px; border-radius: 7px; background: linear-gradient(140deg,#4aa3ff,#34d399); }
+      .brand h1 { font-size: 15px; margin: 0; letter-spacing: .2px; }
+      .nav { display: flex; flex-direction: column; gap: 2px; }
+      .nav button {
+        display: flex; align-items: center; gap: 10px; width: 100%;
+        background: transparent; color: #aebbc9; border: 0; border-radius: 9px;
+        padding: 9px 10px; font: inherit; font-weight: 600; cursor: pointer; text-align: left;
+      }
+      .nav button .ic { width: 18px; text-align: center; }
+      .nav button:hover { background: rgba(255,255,255,.05); color: #e7eef5; }
+      .nav button.active { background: rgba(74,163,255,.16); color: #fff; }
+      .sidebar .foot { margin-top: auto; padding: 8px; color: #5d6b7a; font-size: 11px; line-height: 1.4; }
+
+      /* content */
+      .main { flex: 1; overflow: auto; padding: 24px 28px 28px; }
+      .sec { display: none; }
+      .sec.active { display: block; animation: fade .18s ease; }
+      @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+      .sec > h2 { font-size: 19px; margin: 0 0 3px; }
+      .sec > .subtitle { color: #8497a8; font-size: 12.5px; margin: 0 0 18px; }
+
+      .intro {
+        margin: 0 0 16px; padding: 10px 12px; background: #1b2a3a; border: 1px solid #294a6b;
+        border-radius: 9px; color: #cfe2f5; font-size: 12.5px; line-height: 1.45; display: none;
+      }
+
+      .card { background: #161c24; border: 1px solid #232c38; border-radius: 13px; padding: 15px 17px; margin-bottom: 14px; }
+      .card h3 { font-size: 13px; margin: 0 0 2px; }
+      .card .desc { color: #8497a8; font-size: 12px; margin: 0 0 12px; line-height: 1.45; }
+      .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 10px 0; }
+      .row + .row { border-top: 1px solid #1c242e; }
+      .row.top { padding-top: 0; }
+      .row .lbl { font-weight: 600; }
+      .row .lbl small { display: block; font-weight: 400; color: #8497a8; font-size: 11.5px; margin-top: 2px; line-height: 1.35; }
+
+      label.blk { display: block; font-weight: 600; margin-bottom: 6px; }
+      .hint { color: #8497a8; font-size: 11.5px; margin-top: 6px; line-height: 1.4; }
+      select, input[type=text], input[type=password], input[type=number] {
+        background: #1d232b; color: #fff; border: 1px solid #2c3540; border-radius: 9px;
+        padding: 8px 11px; font: inherit; outline: none;
       }
       select:focus, input:focus { border-color: #4aa3ff; }
       input::placeholder { color: #8d99a7; }
-      .check { display: flex; align-items: center; gap: 9px; font-weight: 600; cursor: pointer; }
-      .check input { width: 16px; height: 16px; }
-      .inline { display: flex; align-items: center; gap: 10px; }
-      .inline input[type="number"] { width: 72px; flex: none; }
-      .keyrow { position: relative; }
-      .reveal {
-        position: absolute; right: 8px; top: 50%; transform: translateY(-50%);
-        background: rgba(255,255,255,0.08); color: #cdd8e3;
-        border: 0; border-radius: 7px; padding: 4px 9px; font: inherit;
-        font-size: 11.5px; font-weight: 600; cursor: pointer;
-      }
-      .reveal:hover { background: rgba(255,255,255,0.16); }
-      button.secondary {
-        background: rgba(255,255,255,0.08); color: #cdd8e3;
-        border: 0; border-radius: 9px; padding: 8px 13px;
-        font: inherit; font-weight: 600; cursor: pointer;
-      }
-      button.secondary:hover { background: rgba(255, 90, 90, 0.24); color: #fff; }
-      footer {
-        display: flex; align-items: center; gap: 12px;
-        padding: 12px 20px 16px; border-top: 1px solid #20262e;
-      }
-      .save {
-        background: #34d399; color: #06210f; border: 0; border-radius: 9px;
-        padding: 10px 18px; font: inherit; font-weight: 700; cursor: pointer;
-      }
-      .save:hover { background: #4ae3aa; }
-      .status { color: #8497a8; font-size: 12.5px; }
-      .status.ok { color: #4ae3aa; }
-      button.secondary.nobg:hover { background: rgba(74,163,255,0.24); color: #fff; }
-      .engineSuggest {
-        background: #1b2a3a; border: 1px solid #294a6b; border-radius: 9px;
-        padding: 9px 11px; color: #cfe2f5; font-size: 12.5px; line-height: 1.45;
-      }
-      .engineBox {
-        margin-top: 10px; padding: 10px 12px; border-radius: 9px;
-        background: #19202a; border: 1px solid #2c3540; font-size: 12.5px; line-height: 1.45;
-      }
+      input[type=number] { width: 64px; }
+      .full { width: 100%; }
+
+      /* toggle */
+      .sw { position: relative; width: 42px; height: 24px; flex: none; }
+      .sw input { opacity: 0; width: 0; height: 0; }
+      .sw .tr { position: absolute; inset: 0; background: #2c3540; border-radius: 99px; transition: .15s; cursor: pointer; }
+      .sw .tr:before { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .15s; }
+      .sw input:checked + .tr { background: #34d399; }
+      .sw input:checked + .tr:before { transform: translateX(18px); }
+
+      .keyrow { position: relative; width: 260px; }
+      .keyrow input { width: 100%; }
+      .reveal { position: absolute; right: 6px; top: 50%; transform: translateY(-50%);
+        background: rgba(255,255,255,.08); color: #cdd8e3; border: 0; border-radius: 7px;
+        padding: 3px 8px; font: inherit; font-size: 11px; font-weight: 600; cursor: pointer; }
+      .reveal:hover { background: rgba(255,255,255,.16); }
+
+      .btn { background: rgba(255,255,255,.08); color: #cdd8e3; border: 0; border-radius: 9px; padding: 8px 13px; font: inherit; font-weight: 600; cursor: pointer; }
+      .btn:hover { background: rgba(255,255,255,.15); }
+      .btn.danger:hover { background: rgba(255,90,90,.24); color: #fff; }
+      .btn.accent:hover { background: rgba(74,163,255,.24); color: #fff; }
+      .btn.primary { background: #34d399; color: #06210f; font-weight: 700; }
+      .btn.primary:hover { background: #4ae3aa; }
+      .btn:disabled { opacity: .5; cursor: default; }
+
+      /* engine panel */
+      .engineSuggest { background: #1b2a3a; border: 1px solid #294a6b; border-radius: 9px; padding: 9px 11px; color: #cfe2f5; font-size: 12.5px; line-height: 1.45; }
+      .engineBox { margin-top: 10px; padding: 10px 12px; border-radius: 9px; background: #19202a; border: 1px solid #2c3540; font-size: 12.5px; line-height: 1.45; }
       .engineBox.ok { border-color: #2f6f4f; background: #16241c; }
       .engineBox.warn { border-color: #6b5a29; background: #241f14; }
       .bar { margin-top: 8px; height: 7px; background: #2c3540; border-radius: 5px; overflow: hidden; }
-      .barfill { height: 100%; width: 0%; background: #4aa3ff; transition: width 0.15s linear; }
+      .barfill { height: 100%; width: 0%; background: #4aa3ff; transition: width .15s linear; }
+      .inline { display: flex; align-items: center; gap: 10px; }
+
+      /* dictionary chips */
+      .chips { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 6px; }
+      .chip { background: #1d2530; border: 1px solid #2c3540; border-radius: 99px; padding: 5px 9px 5px 12px; font-size: 12px; display: flex; align-items: center; gap: 7px; }
+      .chip .x { color: #76879a; cursor: pointer; font-size: 14px; line-height: 1; }
+      .chip .x:hover { color: #ff6b6b; }
+      .empty { color: #76879a; font-size: 12px; }
+
+      /* stats */
+      .stats { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin-bottom: 14px; }
+      .stat { background: #161c24; border: 1px solid #232c38; border-radius: 13px; padding: 15px; }
+      .stat .n { font-size: 23px; font-weight: 700; }
+      .stat .k { color: #8497a8; font-size: 11.5px; margin-top: 2px; }
+      .hist .h { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; color: #cdd8e3; font-size: 12.5px; }
+      .hist .h + .h { border-top: 1px solid #1c242e; }
+      .hist .h .txt { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .hist .h .t { color: #76879a; flex: none; }
+      kbd { background: #1d232b; border: 1px solid #2c3540; border-radius: 7px; padding: 4px 9px; font: inherit; font-size: 12px; }
+
+      .savebar { display: flex; align-items: center; gap: 12px; margin-top: 6px; }
+      .status { color: #8497a8; font-size: 12.5px; }
+      .status.ok { color: #4ae3aa; }
     </style>
   </head>
   <body>
-    <header><h1>Settings</h1></header>
-    <div class="intro" id="intro"></div>
+    <aside class="sidebar">
+      <div class="brand"><div class="dot"></div><h1>GVoice</h1></div>
+      <nav class="nav">
+        <button class="active" data-sec="speech"><span class="ic">🎙</span> Speech engine</button>
+        <button data-sec="ai"><span class="ic">✨</span> AI cleanup</button>
+        <button data-sec="dict"><span class="ic">📖</span> Dictionary</button>
+        <button data-sec="activity"><span class="ic">📊</span> Activity</button>
+        <button data-sec="privacy"><span class="ic">🔒</span> History &amp; privacy</button>
+        <button data-sec="shortcuts"><span class="ic">⌨️</span> Shortcuts</button>
+      </nav>
+      <div class="foot" id="foot">Hold right Option to dictate</div>
+    </aside>
 
-    <div class="form">
-      <div class="field">
-        <label class="row" for="provider">Speech engine</label>
-        <select id="provider">
-          <option value="openai">OpenAI (cloud)</option>
-          <option value="deepgram">Deepgram (cloud)</option>
-          <option value="whisper-local">Local Whisper (offline, on this Mac)</option>
-        </select>
-        <div class="hint">Cloud engines are fast and accurate but need an internet connection and an API key. Local Whisper runs entirely on your machine — no key, no internet, nothing leaves the computer.</div>
-      </div>
+    <main class="main">
+      <div class="intro" id="intro"></div>
 
-      <div class="field" id="enginePanel">
-        <label class="row">On-device engine (free, offline)</label>
-        <div class="engineSuggest" id="engineSuggest">Checking your computer…</div>
-        <div class="inline" style="margin-top:10px">
-          <select id="localModel" style="flex:1">
-            <option value="ggml-base-q5_1.bin">Base model — smaller &amp; faster (57 MB)</option>
-            <option value="ggml-small-q5_1.bin">Small model — more accurate (182 MB)</option>
+      <!-- SPEECH -->
+      <section class="sec active" id="speech">
+        <h2>Speech engine</h2>
+        <p class="subtitle">How your voice gets turned into text.</p>
+
+        <div class="card">
+          <label class="blk" for="provider">Engine</label>
+          <select id="provider" class="full">
+            <option value="openai">OpenAI (cloud)</option>
+            <option value="deepgram">Deepgram (cloud)</option>
+            <option value="whisper-local">Local Whisper (offline, on this computer)</option>
           </select>
+          <div class="hint">Cloud engines are fast and accurate but need internet and an API key. Local Whisper runs entirely on your machine — no key, no internet, nothing leaves the computer.</div>
         </div>
-        <div class="hint">Pick which model to set up. Bigger = more accurate but slower to download and run.</div>
-        <div style="margin-top:10px">
-          <button class="secondary nobg" id="benchBtn" type="button">Test this engine on my computer</button>
-        </div>
-        <div class="engineBox" id="engineProgress" style="display:none">
-          <div id="engineStage">Working…</div>
-          <div class="bar" id="engineBarWrap" style="display:none"><div class="barfill" id="engineBar"></div></div>
-        </div>
-        <div class="engineBox" id="engineResult" style="display:none">
-          <div id="engineVerdict"></div>
+
+        <div class="card" id="enginePanel">
+          <h3>On-device engine (free, offline)</h3>
+          <div class="engineSuggest" id="engineSuggest">Checking your computer…</div>
           <div class="inline" style="margin-top:10px">
-            <button class="save" id="useLocalBtn" type="button">Use on-device</button>
-            <button class="secondary nobg" id="useCloudBtn" type="button">Keep cloud</button>
+            <select id="localModel" style="flex:1">
+              <option value="ggml-base-q5_1.bin">Base model — smaller &amp; faster (57 MB)</option>
+              <option value="ggml-small-q5_1.bin">Small model — more accurate (182 MB)</option>
+            </select>
+          </div>
+          <div class="hint" id="localModelHint">Bigger = more accurate but slower to download and run.</div>
+          <div style="margin-top:10px">
+            <button class="btn accent" id="benchBtn" type="button">Test this engine on my computer</button>
+          </div>
+          <div class="engineBox" id="engineProgress" style="display:none">
+            <div id="engineStage">Working…</div>
+            <div class="bar" id="engineBarWrap" style="display:none"><div class="barfill" id="engineBar"></div></div>
+          </div>
+          <div class="engineBox" id="engineResult" style="display:none">
+            <div id="engineVerdict"></div>
+            <div class="inline" style="margin-top:10px">
+              <button class="btn primary" id="useLocalBtn" type="button">Use on-device</button>
+              <button class="btn accent" id="useCloudBtn" type="button">Keep cloud</button>
+            </div>
           </div>
         </div>
-      </div>
 
-      <div class="field">
-        <label class="check"><input type="checkbox" id="cleanupEnabled" /> Tidy up the text with AI</label>
-        <div class="hint">Adds punctuation, capitalization, and the odd bullet list, without changing your words. Takes a beat longer and uses your cleanup API key.</div>
-      </div>
-
-      <div class="field">
-        <label class="row" for="openaiKey">OpenAI API key</label>
-        <div class="keyrow">
-          <input type="password" id="openaiKey" autocomplete="off" spellcheck="false" placeholder="sk-…" />
-          <button class="reveal" type="button" data-target="openaiKey">Show</button>
+        <div class="card">
+          <h3>API keys</h3>
+          <p class="desc">Stored locally in your .env, never sent anywhere but the engine you pick.</p>
+          <div class="row top"><div class="lbl">OpenAI<small>also powers AI cleanup if no separate key is set</small></div>
+            <div class="keyrow"><input type="password" id="openaiKey" autocomplete="off" spellcheck="false" placeholder="sk-…" /><button class="reveal" type="button" data-target="openaiKey">Show</button></div></div>
+          <div class="row"><div class="lbl">Deepgram<small>only for the Deepgram engine</small></div>
+            <div class="keyrow"><input type="password" id="deepgramKey" autocomplete="off" spellcheck="false" placeholder="Your Deepgram key" /><button class="reveal" type="button" data-target="deepgramKey">Show</button></div></div>
         </div>
-        <div class="hint">Used by the OpenAI engine (and the AI tidy-up, if you don't set a separate cleanup key).</div>
-      </div>
 
-      <div class="field">
-        <label class="row" for="deepgramKey">Deepgram API key</label>
-        <div class="keyrow">
-          <input type="password" id="deepgramKey" autocomplete="off" spellcheck="false" placeholder="Your Deepgram key" />
-          <button class="reveal" type="button" data-target="deepgramKey">Show</button>
-        </div>
-        <div class="hint">Only needed if you pick the Deepgram engine.</div>
-      </div>
+        <div class="savebar"><button class="btn primary saveBtn" type="button">Save</button><span class="status statusEl"></span></div>
+      </section>
 
-      <div class="field">
-        <label class="check"><input type="checkbox" id="recordingsEnabled" /> Keep a copy of recent recordings</label>
-        <div class="hint">Lets you play back or recover a dictation that didn't land. The clips sit unencrypted on this Mac, so turn this off if you'd rather keep nothing.</div>
-        <div class="inline" style="margin-top:10px">
-          <span>Delete recordings after</span>
-          <input type="number" id="retentionDays" min="0" max="365" />
-          <span>days <span class="hint" style="margin:0">(0 = keep until there are 50)</span></span>
+      <!-- AI -->
+      <section class="sec" id="ai">
+        <h2>AI cleanup</h2>
+        <p class="subtitle">Tidies punctuation, capitalization and lists — without changing your words.</p>
+        <div class="card">
+          <div class="row top"><div class="lbl">Tidy up the text with AI<small>adds punctuation, capitals and the odd list; takes a beat longer</small></div>
+            <label class="sw"><input type="checkbox" id="cleanupEnabled" /><span class="tr"></span></label></div>
+          <div class="row"><div class="lbl">Drop spoken corrections<small>"buy milk no wait buy water" → "Buy water."</small></div>
+            <label class="sw"><input type="checkbox" id="selfCorrection" /><span class="tr"></span></label></div>
+          <div class="row"><div class="lbl">Cleanup engine<small>which AI does the tidy-up</small></div>
+            <select id="cleanupProvider">
+              <option value="groq">Groq · Llama-4 Scout (free, default)</option>
+              <option value="openai">OpenAI · GPT-4.1 mini</option>
+            </select></div>
         </div>
-        <div style="margin-top:10px">
-          <button class="secondary" id="clearBtn" type="button">Delete all recordings now</button>
-        </div>
-      </div>
-    </div>
+        <div class="hint" style="margin:-4px 0 14px">Groq is free and needs no key. OpenAI uses your OpenAI key from the Speech tab.</div>
+        <div class="savebar"><button class="btn primary saveBtn" type="button">Save</button><span class="status statusEl"></span></div>
+      </section>
 
-    <footer>
-      <button class="save" id="saveBtn" type="button">Save</button>
-      <span class="status" id="status"></span>
-    </footer>
+      <!-- DICTIONARY -->
+      <section class="sec" id="dict">
+        <h2>Dictionary</h2>
+        <p class="subtitle">Names and coined words GVoice should spell your way. Changes save instantly.</p>
+        <div class="card">
+          <div class="inline" style="margin-bottom:4px">
+            <input type="text" id="dictInput" class="full" placeholder="e.g. Debezium — or paste several, comma-separated" />
+            <button class="btn accent" id="dictAddBtn" type="button">Add</button>
+          </div>
+          <div class="chips" id="dictChips"></div>
+          <div class="status" id="dictStatus" style="margin-top:8px"></div>
+        </div>
+      </section>
+
+      <!-- ACTIVITY -->
+      <section class="sec" id="activity">
+        <h2>Activity</h2>
+        <p class="subtitle">From your recent dictations.</p>
+        <div class="stats">
+          <div class="stat"><div class="n" id="stWords">—</div><div class="k">words dictated</div></div>
+          <div class="stat"><div class="n" id="stSaved">—</div><div class="k">typing time saved</div></div>
+          <div class="stat"><div class="n" id="stStreak">—</div><div class="k">day streak</div></div>
+        </div>
+        <div class="card">
+          <h3>Recent dictations</h3>
+          <div class="hist" id="histList"><div class="empty">No dictations yet.</div></div>
+        </div>
+      </section>
+
+      <!-- PRIVACY -->
+      <section class="sec" id="privacy">
+        <h2>History &amp; privacy</h2>
+        <p class="subtitle">Recordings stay on this computer, unencrypted, so you can recover a missed paste.</p>
+        <div class="card">
+          <div class="row top"><div class="lbl">Keep recent recordings<small>lets you play back or recover a dictation that didn't land</small></div>
+            <label class="sw"><input type="checkbox" id="recordingsEnabled" /><span class="tr"></span></label></div>
+          <div class="row"><div class="lbl">Delete after<small>0 = keep until there are 50</small></div>
+            <div class="inline"><input type="number" id="retentionDays" min="0" max="365" /> <span>days</span></div></div>
+          <div class="row"><div class="lbl">Wipe everything now</div><button class="btn danger" id="clearBtn" type="button">Delete all recordings</button></div>
+        </div>
+        <div class="savebar"><button class="btn primary saveBtn" type="button">Save</button><span class="status statusEl"></span></div>
+      </section>
+
+      <!-- SHORTCUTS -->
+      <section class="sec" id="shortcuts">
+        <h2>Shortcuts</h2>
+        <p class="subtitle">How you trigger and control dictation.</p>
+        <div class="card">
+          <div class="row top"><div class="lbl">Hold to dictate</div><span id="scPrimary"><kbd>right Option</kbd></span></div>
+          <div class="row"><div class="lbl">Also works</div><span style="color:#8497a8" id="scAlt">left Ctrl+Cmd · mouse back button</span></div>
+        </div>
+        <div class="hint">Hold the key, speak, release — the words paste into whatever you're typing in.</div>
+      </section>
+    </main>
 
     <script>
       const el = (id) => document.getElementById(id);
-      const statusEl = el("status");
+      const isWin = navigator.platform.toLowerCase().includes("win");
 
+      // ---- tab switching ----
+      document.querySelectorAll(".nav button").forEach((b) => {
+        b.addEventListener("click", () => {
+          document.querySelectorAll(".nav button").forEach((x) => x.classList.remove("active"));
+          document.querySelectorAll(".sec").forEach((s) => s.classList.remove("active"));
+          b.classList.add("active");
+          el(b.dataset.sec).classList.add("active");
+          if (b.dataset.sec === "activity") loadStats();
+          if (b.dataset.sec === "dict") loadDict();
+        });
+      });
+
+      // ---- settings load / save (shared across tabs) ----
       function fill(view) {
         el("provider").value = view.provider;
         el("cleanupEnabled").checked = !!view.cleanupEnabled;
+        el("selfCorrection").checked = !!view.selfCorrection;
+        if (view.cleanupProvider) el("cleanupProvider").value = view.cleanupProvider;
         el("openaiKey").value = view.openaiKey || "";
         el("deepgramKey").value = view.deepgramKey || "";
         el("recordingsEnabled").checked = !!view.recordingsEnabled;
         el("retentionDays").value = view.retentionDays;
       }
-
       function collect() {
         return {
           provider: el("provider").value,
           cleanupEnabled: el("cleanupEnabled").checked,
+          selfCorrection: el("selfCorrection").checked,
+          cleanupProvider: el("cleanupProvider").value,
           openaiKey: el("openaiKey").value,
           deepgramKey: el("deepgramKey").value,
           recordingsEnabled: el("recordingsEnabled").checked,
           retentionDays: Number(el("retentionDays").value)
         };
       }
-
       function setStatus(text, ok) {
-        statusEl.textContent = text;
-        statusEl.className = "status" + (ok ? " ok" : "");
+        document.querySelectorAll(".statusEl").forEach((s) => {
+          s.textContent = text; s.className = "status statusEl" + (ok ? " ok" : "");
+        });
       }
-
-      el("saveBtn").addEventListener("click", async () => {
+      document.querySelectorAll(".saveBtn").forEach((btn) => btn.addEventListener("click", async () => {
         setStatus("Saving…", false);
         try {
           const view = await window.settingsBridge.save(collect());
           fill(view);
-          setStatus("Saved. New settings apply to your next dictation.", true);
-        } catch (err) {
-          setStatus("Couldn't save — check the app and try again.", false);
+          setStatus("Saved. Applies to your next dictation.", true);
+        } catch {
+          setStatus("Couldn't save — try again.", false);
         }
-      });
-
-      el("clearBtn").addEventListener("click", async () => {
-        if (!confirm("Delete all saved recordings? You won't be able to recover a dictation that didn't land.")) return;
-        const removed = await window.settingsBridge.clearRecordings();
-        setStatus(removed ? `Deleted ${removed} recording${removed === 1 ? "" : "s"}.` : "No recordings to delete.", true);
-      });
+      }));
 
       for (const btn of document.querySelectorAll(".reveal")) {
         btn.addEventListener("click", () => {
@@ -215,6 +329,13 @@
         });
       }
 
+      el("clearBtn").addEventListener("click", async () => {
+        if (!confirm("Delete all saved recordings? You won't be able to recover a dictation that didn't land.")) return;
+        const removed = await window.settingsBridge.clearRecordings();
+        setStatus(removed ? `Deleted ${removed} recording${removed === 1 ? "" : "s"}.` : "No recordings to delete.", true);
+      });
+
+      // ---- intro / first run ----
       window.settingsBridge.onIntro((intro) => {
         const box = el("intro");
         if (!intro || (!intro.firstRun && !intro.reason)) { box.style.display = "none"; return; }
@@ -222,99 +343,134 @@
         box.style.display = "block";
       });
 
-      // --- On-device engine panel: suggest → test (download+benchmark) → choose
-      let lastBenchModel = null;
+      // ---- platform-specific shortcut labels ----
+      if (isWin) {
+        el("foot").textContent = "Hold Ctrl+Shift to dictate";
+        el("scPrimary").innerHTML = "<kbd>Ctrl+Shift</kbd>";
+        el("scAlt").textContent = "either side of the keyboard";
+      }
 
+      // ---- dictionary ----
+      function renderChips(terms) {
+        const wrap = el("dictChips");
+        if (!terms || !terms.length) { wrap.innerHTML = '<span class="empty">No words yet. Add brands, names, or coined terms above.</span>'; return; }
+        wrap.innerHTML = "";
+        for (const t of terms) {
+          const chip = document.createElement("span");
+          chip.className = "chip";
+          const b = document.createElement("b"); b.textContent = t; chip.appendChild(b);
+          const x = document.createElement("span"); x.className = "x"; x.textContent = "×";
+          x.title = "Remove"; x.addEventListener("click", async () => { renderChips(await window.settingsBridge.dictRemove(t)); });
+          chip.appendChild(x); wrap.appendChild(chip);
+        }
+      }
+      async function loadDict() { try { renderChips(await window.settingsBridge.dictList()); } catch {} }
+      async function addDict() {
+        const text = el("dictInput").value.trim();
+        if (!text) return;
+        const res = await window.settingsBridge.dictAdd(text);
+        el("dictInput").value = "";
+        renderChips(res.terms || res);
+        if (res && typeof res.added === "number") {
+          const bits = [`${res.added} added`];
+          if (res.duplicate) bits.push(`${res.duplicate} already there`);
+          if (res.tooLong) bits.push(`${res.tooLong} too long`);
+          el("dictStatus").textContent = bits.join(" · ");
+        }
+      }
+      el("dictAddBtn").addEventListener("click", addDict);
+      el("dictInput").addEventListener("keydown", (e) => { if (e.key === "Enter") addDict(); });
+
+      // ---- activity ----
+      function ago(ts) {
+        if (!ts) return "";
+        const s = Math.max(0, Math.round((Date.now() - ts) / 1000));
+        if (s < 60) return "just now";
+        const m = Math.round(s / 60); if (m < 60) return m + "m ago";
+        const h = Math.round(m / 60); if (h < 24) return h + "h ago";
+        return Math.round(h / 24) + "d ago";
+      }
+      function fmtSaved(min) {
+        if (!min) return "~0 min";
+        if (min < 60) return "~" + min + " min";
+        const h = Math.floor(min / 60), m = min % 60;
+        return "~" + h + "h" + (m ? " " + m + "m" : "");
+      }
+      async function loadStats() {
+        let s; try { s = await window.settingsBridge.stats(); } catch { return; }
+        el("stWords").textContent = (s.words || 0).toLocaleString();
+        el("stSaved").textContent = fmtSaved(s.timeSavedMin || 0);
+        el("stStreak").textContent = (s.streakDays || 0) + (s.streakDays === 1 ? " day" : " days");
+        const list = el("histList");
+        if (!s.recent || !s.recent.length) { list.innerHTML = '<div class="empty">No dictations yet.</div>'; return; }
+        list.innerHTML = "";
+        for (const r of s.recent) {
+          const row = document.createElement("div"); row.className = "h";
+          const txt = document.createElement("span"); txt.className = "txt";
+          txt.textContent = r.text || (r.hasRecording ? "(audio only)" : "");
+          const t = document.createElement("span"); t.className = "t"; t.textContent = ago(r.ts);
+          row.appendChild(txt); row.appendChild(t); list.appendChild(row);
+        }
+      }
+
+      // ---- on-device engine panel (ported from prior settings) ----
+      let lastBenchModel = null;
       window.settingsBridge.onEngineProgress((p) => {
         el("engineStage").textContent = p.stage || "Working…";
         const wrap = el("engineBarWrap");
         if (p && typeof p.fraction === "number" && p.fraction >= 0) {
-          wrap.style.display = "block";
-          el("engineBar").style.width = Math.round(p.fraction * 100) + "%";
-        } else {
-          wrap.style.display = "none"; // indeterminate (no known total) or a plain stage
-        }
+          wrap.style.display = "block"; el("engineBar").style.width = Math.round(p.fraction * 100) + "%";
+        } else { wrap.style.display = "none"; }
       });
-
       async function initEnginePanel() {
         const suggest = el("engineSuggest");
         let info;
-        try {
-          info = await window.settingsBridge.engineProbe();
-        } catch {
-          suggest.textContent = "Couldn't check this computer — pick a cloud engine above and paste its key below.";
-          return;
-        }
-        // Mac (and anything non-Windows) has no on-device engine in this version.
+        try { info = await window.settingsBridge.engineProbe(); }
+        catch { suggest.textContent = "Couldn't check this computer — pick a cloud engine above and paste its key."; return; }
         if (info.platform && info.platform !== "win32") {
-          suggest.textContent = "The free on-device engine isn't available on this platform yet — use a cloud engine above (paste your key below).";
-          el("benchBtn").style.display = "none";
-          el("localModel").style.display = "none";
+          suggest.textContent = "The free on-device engine isn't available on this platform yet — use a cloud engine above (paste its key under API keys).";
+          el("benchBtn").style.display = "none"; el("localModel").style.display = "none";
+          el("localModelHint").style.display = "none";
           return;
         }
         suggest.textContent = info.suggestion ? info.suggestion.text : "";
         if (info.recommendedModel) el("localModel").value = info.recommendedModel;
         if (info.currentModel) el("localModel").value = info.currentModel;
       }
-
       el("benchBtn").addEventListener("click", async () => {
-        const model = el("localModel").value;
-        lastBenchModel = model;
-        el("benchBtn").disabled = true;
-        el("engineResult").style.display = "none";
-        el("engineProgress").style.display = "block";
-        el("engineStage").textContent = "Getting ready…";
+        const model = el("localModel").value; lastBenchModel = model;
+        el("benchBtn").disabled = true; el("engineResult").style.display = "none";
+        el("engineProgress").style.display = "block"; el("engineStage").textContent = "Getting ready…";
         el("engineBarWrap").style.display = "none";
         let res;
-        try {
-          res = await window.settingsBridge.engineBenchmark({ model });
-        } catch (err) {
-          res = { ok: false, error: "The speed test couldn't run." };
-        }
-        el("engineProgress").style.display = "none";
-        el("benchBtn").disabled = false;
-        const box = el("engineResult");
-        box.style.display = "block";
-        if (!res.ok) {
-          box.className = "engineBox warn";
-          el("engineVerdict").textContent = res.error || "The speed test couldn't run.";
-          return;
-        }
+        try { res = await window.settingsBridge.engineBenchmark({ model }); }
+        catch { res = { ok: false, error: "The speed test couldn't run." }; }
+        el("engineProgress").style.display = "none"; el("benchBtn").disabled = false;
+        const box = el("engineResult"); box.style.display = "block";
+        if (!res.ok) { box.className = "engineBox warn"; el("engineVerdict").textContent = res.error || "The speed test couldn't run."; return; }
         const v = res.verdict;
         box.className = "engineBox " + (v.fastEnough ? "ok" : "warn");
         el("engineVerdict").textContent = v.reason;
-        // Lead with what we suggest: the green/primary button is the recommendation.
         el("useLocalBtn").textContent = v.fastEnough ? "Use on-device (recommended)" : "Use on-device anyway";
         el("useCloudBtn").textContent = v.fastEnough ? "Keep cloud" : "Keep cloud (recommended)";
       });
-
-      // engine:apply refuses to point at a model that isn't on disk and returns
-      // { error } instead of a settings view. Show it in the engine panel rather
-      // than passing { error } to fill() (which would read undefined fields and
-      // silently break the form while the switch looked like it succeeded).
       function showEngineError(message) {
-        const box = el("engineResult");
-        box.style.display = "block";
-        box.className = "engineBox warn";
-        el("engineVerdict").textContent = message;
+        const box = el("engineResult"); box.style.display = "block";
+        box.className = "engineBox warn"; el("engineVerdict").textContent = message;
       }
-
       el("useLocalBtn").addEventListener("click", async () => {
         const res = await window.settingsBridge.engineApply({ provider: "whisper-local", modelName: lastBenchModel || el("localModel").value });
         if (res && res.error) { showEngineError(res.error); return; }
-        fill(res);
-        setStatus("On-device engine set as your default.", true);
+        fill(res); setStatus("On-device engine set as your default.", true);
       });
-
       el("useCloudBtn").addEventListener("click", async () => {
-        const cur = el("provider").value;
-        const cloud = cur === "whisper-local" ? "deepgram" : cur;
+        const cur = el("provider").value; const cloud = cur === "whisper-local" ? "deepgram" : cur;
         const res = await window.settingsBridge.engineApply({ provider: cloud });
         if (res && res.error) { showEngineError(res.error); return; }
-        fill(res);
-        setStatus("Cloud engine kept. Add its API key below if you haven't.", true);
+        fill(res); setStatus("Cloud engine kept. Add its API key under API keys if you haven't.", true);
       });
 
+      // ---- boot ----
       window.settingsBridge.get().then(fill);
       initEnginePanel();
     </script>

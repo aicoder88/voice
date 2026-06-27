@@ -47,6 +47,7 @@ import { createCorrectionWatcher } from "./src/correction-watch.js";
 import { looksLikeRetraction } from "./src/cleanup.js";
 import { captureForegroundWindow, restoreForegroundWindow, getWindowRect, isEditableFieldFocused, isForegroundWindow, readbackPasteTarget } from "./src/foreground.js";
 import { initHistory, getHistory, getHistoryPath, recordTranscript } from "./src/history.js";
+import { computeStats } from "./src/stats.js";
 import { ensureWhisperServer, stopWhisperServer } from "./src/providers/whisper-local.js";
 import { ENV_FILE, MODELS_DIR, BIN_DIR } from "./src/bootstrap-env.js";
 import { writeEnvFile, settingsView, patchFromView, VALID_PROVIDERS } from "./src/settings.js";
@@ -729,8 +730,10 @@ function openSettingsWindow(opts = {}) {
     return;
   }
   settingsWindow = new BrowserWindow({
-    width: 480,
-    height: 620,
+    width: 760,
+    height: 600,
+    minWidth: 680,
+    minHeight: 520,
     title: "GVoice settings",
     show: true,
     resizable: true,
@@ -947,7 +950,8 @@ async function processTranscript(transcript, restoreHwnd = null) {
   // retracted words verbatim. looksLikeRetraction matches only unambiguous
   // multi-word cues (not a bare "no"/"actually", which the prompt judges in
   // context) — when one appears, always run cleanup so the retraction is dropped.
-  const hasRetraction = looksLikeRetraction(textToType);
+  // Gated by the Settings toggle (SELF_CORRECTION); off → don't force-route.
+  const hasRetraction = process.env.SELF_CORRECTION !== "false" && looksLikeRetraction(textToType);
   // Short, clean utterances skip LLM cleanup — they need only a trailing period,
   // not restructuring. The LLM adds value on long or messy dictations; sending
   // short clear phrases to it causes unneeded rewriting.
@@ -1288,6 +1292,8 @@ function setupIpc() {
   // Settings window (request/response). get returns the current view; save
   // writes the .env, applies the change live, and returns the fresh view.
   ipcMain.handle("settings:get", () => settingsView(process.env));
+  // Activity tab: words/time-saved/streak + recent dictations from history.json.
+  ipcMain.handle("stats:get", () => computeStats(getHistory(), Date.now()));
   ipcMain.handle("settings:save", async (_event, payload) => {
     const patch = patchFromView(payload || {});
     try {

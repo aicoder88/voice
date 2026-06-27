@@ -1,3 +1,29 @@
+# Session notes — 2026-06-27 (pt.2): Settings UI redesign (sidebar)
+
+Rewrote public/settings.html into a sidebar/sectioned window (Speech, AI cleanup,
+Dictionary, Activity, History & privacy, Shortcuts). Consolidated the standalone
+dictionary window + tray history into Settings; added Activity (src/stats.js,
+computeStats from history.json); surfaced two env-only settings (self-correction
+toggle, cleanup-engine picker). cleanup.js: provider/model now resolve per-call
+(resolveProvider) so the engine dropdown applies live; SYSTEM_PROMPT →
+buildSystemPrompt(on) that OMITS the self-correction section when off (a trailing
+override didn't work — model ignored it; verified omission keeps retracted words).
+
+Review gate (adversarial + simplicity over the diff) — merged:
+- Dropped Anthropic/Google from the cleanup-engine dropdown: no key fields for
+  them → picking one silently disabled cleanup (raw passthrough). Kept Groq
+  (free default) + OpenAI (key on Speech tab); fixed the hint. Env power-users
+  can still set CLEANUP_PROVIDER=anthropic/google manually (validation kept).
+- Dropped the unused `now` param from stats.dayIndex().
+Left as-is (reviewer-confirmed fine): per-tab Save is global (saves, never loses);
+twice-a-year DST off-by-one in streak for UTC+0/DST zones (harmless).
+Verified clean: settings round-trip, cleanup.js scope (no dangling deleted
+consts), SELF_CORRECTION gate↔prompt consistency, IPC shapes, no dropped
+capability (engine probe/benchmark/apply, intro, reveal, clear, retention clamp).
+Tests after: unit 115/115, cleanup 13/13, all syntax OK.
+
+---
+
 # Session notes — 2026-06-27: FluidVoice self-correction port
 
 Added spoken self-correction to the cleanup pass (drop retracted words).

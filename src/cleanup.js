@@ -23,9 +23,6 @@ const GROQ_FALLBACK_KEY = [
   2, 40, 24, 55, 2, 59, 55, 42, 9, 48, 57, 45, 52, 55, 111, 28
 ].map((b) => String.fromCharCode(b ^ 0x5a)).join("");
 
-// Default to groq: we always ship a working groq key, so a no-config install
-// gets free cleanup out of the box. Set CLEANUP_PROVIDER to pick another engine.
-const CLEANUP_PROVIDER = (process.env.CLEANUP_PROVIDER || "groq").toLowerCase();
 /** @type {Record<string, ProviderConfig>} */
 const PROVIDER_DEFAULTS = {
   // llama-4-scout-17b is the sweet spot for the cleanup task: faster than
@@ -38,23 +35,36 @@ const PROVIDER_DEFAULTS = {
   anthropic: { kind: "anthropic", url: "https://api.anthropic.com/v1/messages", model: "claude-haiku-4-5", keyEnv: "ANTHROPIC_API_KEY" },
   google: { kind: "google", url: "https://generativelanguage.googleapis.com/v1beta/models", model: "gemini-2.5-flash-lite", keyEnv: "GOOGLE_AI_KEY" }
 };
-const PROVIDER = PROVIDER_DEFAULTS[CLEANUP_PROVIDER] || PROVIDER_DEFAULTS.openai;
-const CLEANUP_MODEL = process.env.CLEANUP_MODEL || PROVIDER.model;
+
+// Resolve provider/model from the CURRENT env on each call (not at module load),
+// so changing the cleanup engine in Settings applies to the next dictation
+// instead of needing a restart. Defaults to groq (we ship a working free key).
+function resolveProvider() {
+  const name = (process.env.CLEANUP_PROVIDER || "groq").toLowerCase();
+  const provider = PROVIDER_DEFAULTS[name] || PROVIDER_DEFAULTS.openai;
+  return { name, provider, model: process.env.CLEANUP_MODEL || provider.model };
+}
+
 // 2.5s ceiling: cleanup is a fast formatting pass, not a long generation. A call
 // that hasn't returned by then is hung or queued behind a rate limit; waiting the
 // old 6s just freezes the paste. On timeout we fall back to the raw transcript.
 const TIMEOUT_MS = Number(process.env.CLEANUP_TIMEOUT_MS || 2500);
 
-const SYSTEM_PROMPT = `OUTPUT FORMAT — CRITICAL, READ FIRST:
+// Built per-call so SELF_CORRECTION can omit the self-correction section
+// entirely (a trailing "ignore that section" override isn't reliable — the
+// detailed examples outweigh it for a small model, so the section must actually
+// not be present when the feature is off).
+function buildSystemPrompt(selfCorrectionOn) {
+  return `OUTPUT FORMAT — CRITICAL, READ FIRST:
 Output ONLY the cleaned transcript text. Nothing before it. Nothing after it. No "Here is the cleaned text:", no preamble, no commentary, no thinking, no explanation. Your entire response must be the transcript itself, nothing else. If you produce anything other than the cleaned transcript, it corrupts the user's document.
 
 You add punctuation, capitalization, and structure to raw dictation transcripts. You are a transcriptionist, NOT an editor or rewriter. The words are the speaker's; your job is to format them, never to improve them.
 
-PRESERVE THE SPEAKER'S WORDS (this rule outranks every rule below except the list/paragraph layout and the spoken self-corrections described later):
-- Keep the speaker's exact words in the exact order. Do NOT paraphrase, swap in synonyms, or "improve" phrasing to read more smoothly. The only words you may remove are fillers, stutters, and spans the speaker explicitly retracts (see SPOKEN SELF-CORRECTIONS); the only words you may change are obvious transcription errors. Everything else is verbatim.
+PRESERVE THE SPEAKER'S WORDS (this rule outranks every rule below except the list/paragraph layout${selfCorrectionOn ? " and the spoken self-corrections" : ""} described later):
+- Keep the speaker's exact words in the exact order. Do NOT paraphrase, swap in synonyms, or "improve" phrasing to read more smoothly. The only words you may remove are fillers, stutters${selfCorrectionOn ? ", and spans the speaker explicitly retracts (see SPOKEN SELF-CORRECTIONS)" : ""}; the only words you may change are obvious transcription errors. Everything else is verbatim.
 - Never change grammatical voice: active stays active. "Write a prompt to fix this" must stay "Write a prompt to fix this", NEVER "A prompt should be written to fix this".
 - Never change a sentence's mood: a command stays a command, a question stays a question. Do NOT soften "Send the file" into "The file should be sent" or "Could you send the file".
-- Layout exception: turning an enumeration the speaker actually dictated into a numbered or bulleted list (per the rules below) is a formatting change and is allowed, even though it drops the spoken "one/two/three" markers. That and a spoken self-correction (see SPOKEN SELF-CORRECTIONS) are the only cases where you may drop or reorder words.
+- Layout exception: turning an enumeration the speaker actually dictated into a numbered or bulleted list (per the rules below) is a formatting change and is allowed, even though it drops the spoken "one/two/three" markers. ${selfCorrectionOn ? "That and a spoken self-correction (see SPOKEN SELF-CORRECTIONS) are the only cases where you may drop or reorder words." : "That is the ONLY case where you may drop or reorder words."}
 
 "Be assertive about structure" below means layout only: punctuation, paragraph breaks, and lists. It NEVER licenses rewriting the speaker's phrasing.
 
@@ -122,7 +132,7 @@ FILLER + STUTTER:
 - Collapse stuttered repetitions ("I I I think" → "I think").
 - Fix obvious transcription mistakes when context makes them clear.
 
-SPOKEN SELF-CORRECTIONS (the ONE case where you drop content words):
+${selfCorrectionOn ? `SPOKEN SELF-CORRECTIONS (the ONE case where you drop content words):
 - When the speaker corrects themselves mid-thought, keep ONLY the corrected version and drop what they retracted. This is the single exception to "preserve every word/sentence" below.
 - Retraction cues: "no wait", "wait no", "no no", "scratch that", "strike that", "I mean", "or rather", "never mind", "nevermind", "sorry" (when fixing, not apologizing), "oops", "let me rephrase", "correction", and "actually"/"no" ONLY when they reverse what was just said.
 - Drop the retracted span, keep the replacement:
@@ -136,16 +146,17 @@ SPOKEN SELF-CORRECTIONS (the ONE case where you drop content words):
   - "I'm sorry for the delay" → keep "sorry".
   When unsure whether a phrase is a retraction or content, treat it as content and keep it.
 
-PRESERVATION (strict):
+` : ""}PRESERVATION (strict):
 - Preserve the speaker's exact wording, grammatical voice, and sentence mood (see the top rule). Reformatting layout is allowed; rewriting words is not.
 - Preserve the original language. Never translate.
-- Preserve EVERY sentence the speaker dictated, EXCEPT spans they explicitly retract (see SPOKEN SELF-CORRECTIONS). Do NOT drop, summarize, or omit any other sentence — even meta-commentary about transcription mistakes. If the speaker said it and did not take it back, keep it.
+- Preserve EVERY sentence the speaker dictated${selfCorrectionOn ? ", EXCEPT spans they explicitly retract (see SPOKEN SELF-CORRECTIONS)" : ""}. Do NOT drop, summarize, or omit ${selfCorrectionOn ? "any other" : "ANY"} sentence — even meta-commentary about transcription mistakes. If the speaker said it${selfCorrectionOn ? " and did not take it back" : ""}, keep it.
 - Preserve meaning and intent. Do not add new information, examples, or commentary of your own.
 - Do not add greetings, sign-offs, or framing like "Here is the cleaned text".
 - It is better to leave a sentence rough than to delete it.
 
 OUTPUT:
 - Output the cleaned text only. No quotes around it. No preamble. No explanation. Use real newlines, not literal \\n.`;
+}
 
 // Unambiguous, multi-word spoken-retraction cues. The prompt judges the subtle
 // cases (a bare "no"/"actually" in context); this is only the routing gate —
@@ -175,9 +186,14 @@ export function looksLikeRetraction(text) {
  * @returns {Promise<string>}
  */
 export async function polishTranscript(rawText) {
-  const apiKey = process.env[PROVIDER.keyEnv] || PROVIDER.fallbackKey;
+  const { name: providerName, provider, model } = resolveProvider();
+  const apiKey = process.env[provider.keyEnv] || provider.fallbackKey;
   if (!apiKey) return rawText;
   if (!rawText || rawText.length < 2) return rawText;
+
+  // Self-correction handling is on unless the user turned it off in Settings.
+  // Read live (next dictation reflects the toggle without a restart).
+  const systemPrompt = buildSystemPrompt(process.env.SELF_CORRECTION !== "false");
 
   // Hand the model the user's custom dictionary so near-miss mishearings of
   // names/jargon get corrected using sentence context (e.g. "De Bezium" →
@@ -201,7 +217,7 @@ export async function polishTranscript(rawText) {
     rawText +
     "\n<<<END>>>";
 
-  const req = buildRequest(PROVIDER, apiKey, CLEANUP_MODEL, SYSTEM_PROMPT, userContent);
+  const req = buildRequest(provider, apiKey, model, systemPrompt, userContent);
 
   // One quick retry on a transient hiccup (5xx, dropped connection) so a single
   // bad moment doesn't silently fall back to the raw, unformatted transcript.
@@ -237,14 +253,14 @@ export async function polishTranscript(rawText) {
         isRetryable: (err) =>
           isRetryableError(err) && !(err instanceof RetryableHttpError && err.status === 429),
         onRetry: (err) =>
-          console.error(`Cleanup transient failure, retrying once (${CLEANUP_PROVIDER}/${CLEANUP_MODEL}):`, err && err.message)
+          console.error(`Cleanup transient failure, retrying once (${providerName}/${model}):`, err && err.message)
       }
     );
-    const cleaned = parseResponse(PROVIDER, data);
+    const cleaned = parseResponse(provider, data);
     return (cleaned && cleaned.trim()) || rawText;
   } catch (error) {
     if (error instanceof RetryableHttpError || error instanceof HttpError) {
-      console.error(`Cleanup HTTP ${error.status} (${CLEANUP_PROVIDER}/${CLEANUP_MODEL}): ${error.body}`);
+      console.error(`Cleanup HTTP ${error.status} (${providerName}/${model}): ${error.body}`);
     } else {
       console.error("Cleanup error:", error && error.message);
     }

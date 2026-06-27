@@ -19,6 +19,9 @@ import { dirname } from "node:path";
 // comments) is left exactly as the user wrote it.
 
 export const VALID_PROVIDERS = new Set(["openai", "deepgram", "whisper-local"]);
+// AI-cleanup engines the Settings dropdown can pick (mirrors cleanup.js's
+// PROVIDER_DEFAULTS keys). "groq" is the shipped free-tier default.
+export const CLEANUP_PROVIDERS = new Set(["groq", "openai", "anthropic", "google"]);
 
 /**
  * Parse .env text into the ordered raw lines plus a name→{ value, lineIndex }
@@ -134,6 +137,12 @@ export function settingsView(env = {}) {
     // CLEANUP_ENABLED === "false"), or a fresh install's first Save would
     // silently write =false and turn off the tidy-up that had been running.
     cleanupEnabled: asBool(env.CLEANUP_ENABLED, true),
+    // Self-correction defaults ON (matches main.js: enabled unless ="false").
+    selfCorrection: asBool(env.SELF_CORRECTION, true),
+    // Which AI does the tidy-up. Mirrors cleanup.js's CLEANUP_PROVIDER default.
+    cleanupProvider: CLEANUP_PROVIDERS.has((env.CLEANUP_PROVIDER || "groq").toLowerCase())
+      ? (env.CLEANUP_PROVIDER || "groq").toLowerCase()
+      : "groq",
     openaiKey: env.OPENAI_API_KEY || "",
     deepgramKey: env.DEEPGRAM_API_KEY || "",
     recordingsEnabled: asBool(env.RECORDINGS_ENABLED, true),
@@ -163,6 +172,12 @@ export function patchFromView(payload = {}) {
   }
   if (typeof payload.cleanupEnabled === "boolean") {
     patch.CLEANUP_ENABLED = payload.cleanupEnabled ? "true" : "false";
+  }
+  if (typeof payload.selfCorrection === "boolean") {
+    patch.SELF_CORRECTION = payload.selfCorrection ? "true" : "false";
+  }
+  if (typeof payload.cleanupProvider === "string" && CLEANUP_PROVIDERS.has(payload.cleanupProvider)) {
+    patch.CLEANUP_PROVIDER = payload.cleanupProvider;
   }
   if (typeof payload.openaiKey === "string") patch.OPENAI_API_KEY = payload.openaiKey.trim();
   if (typeof payload.deepgramKey === "string") patch.DEEPGRAM_API_KEY = payload.deepgramKey.trim();

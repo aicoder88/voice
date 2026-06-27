@@ -7,12 +7,23 @@ Impact-ordered:
 1. [DONE] Self-correction in cleanup — drop spoken retractions ("buy milk no wait
    buy water" → "Buy water."). Prompt-only change in src/cleanup.js, scoped as the
    single exception to "preserve every word". Verify with `node scripts/cleanup-test.js`.
-2. [NEXT] Per-app prompt styles — different cleanup style per frontmost app
-   (FluidVoice marquee feature). Needs: getForegroundAppName() in foreground.js,
-   press-time capture threaded to polishTranscript, src/app-prompts.js JSON store,
-   cleanup.js appends per-app instruction, an "App styles…" window mirroring the
-   dictionary window. Adds config-UI surface → confirm with user before building.
-3. [NEXT] Usage stats — words/day, streak, time-saved from history.json. Zero risk.
+2. [IN PROGRESS] Settings UI redesign (sidebar + consolidate) — user approved
+   full scope. Sections: Speech engine, AI cleanup, Dictionary (moved in),
+   Activity (stats), History & privacy, Shortcuts. Files:
+   - src/settings.js: add selfCorrection (SELF_CORRECTION) + cleanupProvider
+     (CLEANUP_PROVIDER) to settingsView/patchFromView.
+   - src/stats.js: NEW pure module — computeStats(history) → words/timeSaved/
+     streak/recent. Unit-tested.
+   - src/cleanup.js: SELF_CORRECTION off → trailing prompt override (read at
+     call time so it's live).
+   - main.js: gate respects SELF_CORRECTION; new stats:get handler; bump
+     settings window to ~760x580.
+   - preload-settings.cjs: add statsGet + dict list/add/remove passthrough.
+   - public/settings.html: full sidebar rewrite, wired to the bridge.
+   Prototype approved (scratchpad/settings-proto.html). Contained to the
+   settings window — dictation core untouched.
+3. [DONE-ish via #2] Usage stats — Activity tab from history.json.
+- Per-app prompt styles: deferred (user said not now).
 
 Out of scope (scope creep on a working app): Command Mode, Rewrite Mode, light theming.
 

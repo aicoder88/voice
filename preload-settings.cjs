@@ -8,6 +8,12 @@ contextBridge.exposeInMainWorld("settingsBridge", {
   get: () => ipcRenderer.invoke("settings:get"),
   save: (view) => ipcRenderer.invoke("settings:save", view),
   clearRecordings: () => ipcRenderer.invoke("settings:clear-recordings"),
+  // Activity tab.
+  stats: () => ipcRenderer.invoke("stats:get"),
+  // Dictionary section — reuses the same handlers the standalone manager uses.
+  dictList: () => ipcRenderer.invoke("vocab:list"),
+  dictAdd: (text) => ipcRenderer.invoke("vocab:add-many", text),
+  dictRemove: (term) => ipcRenderer.invoke("vocab:remove", term),
   // First-run welcome / "what's missing" note pushed by main on open.
   onIntro: (callback) => {
     ipcRenderer.on("settings:intro", (_event, intro) => callback(intro));
