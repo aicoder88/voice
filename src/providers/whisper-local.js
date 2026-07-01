@@ -11,7 +11,7 @@
 // or the parity harness).
 
 import { spawn, execFileSync } from "node:child_process";
-import { writeFile, unlink, mkdtemp, readFile } from "node:fs/promises";
+import { writeFile, mkdtemp, readFile, rm } from "node:fs/promises";
 import { writeFileSync, readFileSync, existsSync, unlinkSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -576,7 +576,9 @@ async function transcribePcm(pcmBuffer, sampleRate, bin, model, prompt, language
     console.error("[relay] whisper-local (cli) " + (Date.now() - t0) + "ms [" + language + "]: " + JSON.stringify(text));
     return text;
   } finally {
-    unlink(wavPath).catch(() => {});
+    // Remove the whole temp dir, not just the WAV inside it — otherwise every
+    // CLI-fallback dictation leaves an empty "voice-stt-*" directory behind.
+    rm(dir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
